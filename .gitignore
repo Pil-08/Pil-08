@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build output
+build/
+dist/
+node_modules/
+*.spec
+!packaging/*.spec
+
+# Local scripts and personal files (never versioned)
+*.bat
+*.ps1
+
+# Secrets and local configuration - NEVER commit
+.env
+config.json
+state.json
+*.corrupt.json
+
+# Runtime output
+responses/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

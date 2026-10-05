@@ -20,11 +20,11 @@ from decimal import Decimal
 from typing import Any, Optional
 
 MILLON = Decimal(1_000_000)
-D = Decimal
+_D = Decimal
 
-ESCRITURA_CACHE_5M = D("1.25")
-ESCRITURA_CACHE_1H = D("2")
-DESCUENTO_LOTE = D("0.5")
+ESCRITURA_CACHE_5M = _D("1.25")
+ESCRITURA_CACHE_1H = _D("2")
+DESCUENTO_LOTE = _D("0.5")
 
 # Niveles de `output_config.effort` según el modelo.
 _E5 = ("low", "medium", "high", "xhigh", "max")
@@ -40,7 +40,7 @@ class ModeloInfo:
     familia: str
     entrada: Decimal  # USD por millón de tokens
     salida: Decimal
-    lectura_cache: Decimal = D("0.1")  # multiplicador sobre `entrada`
+    lectura_cache: Decimal = _D("0.1")  # multiplicador sobre `entrada`
     max_salida: Optional[int] = None
     contexto: Optional[int] = None
     min_cache: Optional[int] = None  # prefijo mínimo cacheable, en tokens
@@ -48,35 +48,35 @@ class ModeloInfo:
     retirado: bool = False
 
 
-def _m(id_, nombre, familia, e, s, **kw) -> ModeloInfo:
-    return ModeloInfo(id_, nombre, familia, D(str(e)), D(str(s)), **kw)
+def _modelo(id_, nombre, familia, e, s, **kw) -> ModeloInfo:
+    return ModeloInfo(id_, nombre, familia, _D(str(e)), _D(str(s)), **kw)
 
 
 _MODELOS = [
-    _m("claude-fable-5-1", "Claude Fable 5.1", "fable", 10, 50, lectura_cache=D("0.025"),
+    _modelo("claude-fable-5-1", "Claude Fable 5.1", "fable", 10, 50, lectura_cache=_D("0.025"),
        max_salida=128_000, contexto=1_000_000, min_cache=512, esfuerzo=_E5),
-    _m("claude-fable-5", "Claude Fable 5", "fable", 10, 50, esfuerzo=_E5),
-    _m("claude-mythos-5-1", "Claude Mythos 5.1", "mythos", 10, 50, lectura_cache=D("0.025"),
+    _modelo("claude-fable-5", "Claude Fable 5", "fable", 10, 50, esfuerzo=_E5),
+    _modelo("claude-mythos-5-1", "Claude Mythos 5.1", "mythos", 10, 50, lectura_cache=_D("0.025"),
        min_cache=512, esfuerzo=_E5),
-    _m("claude-mythos-5", "Claude Mythos 5", "mythos", 10, 50, esfuerzo=_E5),
-    _m("claude-opus-5-5", "Claude Opus 5.5", "opus", 4, 20, lectura_cache=D("0.05"),
+    _modelo("claude-mythos-5", "Claude Mythos 5", "mythos", 10, 50, esfuerzo=_E5),
+    _modelo("claude-opus-5-5", "Claude Opus 5.5", "opus", 4, 20, lectura_cache=_D("0.05"),
        max_salida=128_000, contexto=1_000_000, min_cache=512, esfuerzo=_E5),
-    _m("claude-opus-5", "Claude Opus 5", "opus", 5, 25, min_cache=512, esfuerzo=_E5),
-    _m("claude-opus-4-8", "Claude Opus 4.8", "opus", 5, 25, min_cache=1024, esfuerzo=_E5),
-    _m("claude-opus-4-7", "Claude Opus 4.7", "opus", 5, 25, min_cache=2048, esfuerzo=_E5),
-    _m("claude-opus-4-6", "Claude Opus 4.6", "opus", 5, 25, min_cache=4096, esfuerzo=_E4),
-    _m("claude-opus-4-5", "Claude Opus 4.5", "opus", 5, 25, min_cache=4096, esfuerzo=_E3),
-    _m("claude-opus-4-1", "Claude Opus 4.1", "opus", 15, 75, retirado=True),
-    _m("claude-opus-4", "Claude Opus 4", "opus", 15, 75, retirado=True),
-    _m("claude-sonnet-5-5", "Claude Sonnet 5.5", "sonnet", 2, 10,
+    _modelo("claude-opus-5", "Claude Opus 5", "opus", 5, 25, min_cache=512, esfuerzo=_E5),
+    _modelo("claude-opus-4-8", "Claude Opus 4.8", "opus", 5, 25, min_cache=1024, esfuerzo=_E5),
+    _modelo("claude-opus-4-7", "Claude Opus 4.7", "opus", 5, 25, min_cache=2048, esfuerzo=_E5),
+    _modelo("claude-opus-4-6", "Claude Opus 4.6", "opus", 5, 25, min_cache=4096, esfuerzo=_E4),
+    _modelo("claude-opus-4-5", "Claude Opus 4.5", "opus", 5, 25, min_cache=4096, esfuerzo=_E3),
+    _modelo("claude-opus-4-1", "Claude Opus 4.1", "opus", 15, 75, retirado=True),
+    _modelo("claude-opus-4", "Claude Opus 4", "opus", 15, 75, retirado=True),
+    _modelo("claude-sonnet-5-5", "Claude Sonnet 5.5", "sonnet", 2, 10,
        max_salida=128_000, contexto=1_000_000, min_cache=512, esfuerzo=_E5),
-    _m("claude-sonnet-5", "Claude Sonnet 5", "sonnet", 2, 10, min_cache=1024, esfuerzo=_E5),
-    _m("claude-sonnet-4-6", "Claude Sonnet 4.6", "sonnet", 3, 15, min_cache=1024, esfuerzo=_E4),
-    _m("claude-sonnet-4-5", "Claude Sonnet 4.5", "sonnet", 3, 15, min_cache=1024),
-    _m("claude-sonnet-4", "Claude Sonnet 4", "sonnet", 3, 15, retirado=True),
-    _m("claude-haiku-4-5", "Claude Haiku 4.5", "haiku", 1, 5,
+    _modelo("claude-sonnet-5", "Claude Sonnet 5", "sonnet", 2, 10, min_cache=1024, esfuerzo=_E5),
+    _modelo("claude-sonnet-4-6", "Claude Sonnet 4.6", "sonnet", 3, 15, min_cache=1024, esfuerzo=_E4),
+    _modelo("claude-sonnet-4-5", "Claude Sonnet 4.5", "sonnet", 3, 15, min_cache=1024),
+    _modelo("claude-sonnet-4", "Claude Sonnet 4", "sonnet", 3, 15, retirado=True),
+    _modelo("claude-haiku-4-5", "Claude Haiku 4.5", "haiku", 1, 5,
        max_salida=64_000, contexto=200_000, min_cache=4096),
-    _m("claude-haiku-3-5", "Claude Haiku 3.5", "haiku", "0.8", 4, retirado=True),
+    _modelo("claude-haiku-3-5", "Claude Haiku 3.5", "haiku", "0.8", 4, retirado=True),
 ]
 
 CATALOGO: dict[str, ModeloInfo] = {m.id: m for m in _MODELOS}
@@ -90,13 +90,13 @@ _ALIAS = {
 # Precio por familia para modelos que aún no están en el catálogo: el del buque
 # insignia actual de la familia, y para lo desconocido el más caro de todos.
 _FAMILIA_CARA = {
-    "fable": (D(10), D(50)),
-    "mythos": (D(10), D(50)),
-    "opus": (D(5), D(25)),
-    "sonnet": (D(3), D(15)),
-    "haiku": (D(1), D(5)),
+    "fable": (_D(10), _D(50)),
+    "mythos": (_D(10), _D(50)),
+    "opus": (_D(5), _D(25)),
+    "sonnet": (_D(3), _D(15)),
+    "haiku": (_D(1), _D(5)),
 }
-_DESCONOCIDO = (D(10), D(50))
+_DESCONOCIDO = (_D(10), _D(50))
 
 # Modelos que se ofrecen antes de consultar la API en vivo. El primero es el
 # predeterminado: Haiku 4.5 es más barato, pero su retirada más temprana es el
@@ -174,15 +174,15 @@ def resolver_precios(
         fam = familia_de(modelo)
         if fam:
             e, s = _FAMILIA_CARA[fam]
-            base = Precios(e, s, D("0.1"), "familia", modelo)
+            base = Precios(e, s, _D("0.1"), "familia", modelo)
         else:
             e, s = _DESCONOCIDO
-            base = Precios(e, s, D("0.1"), "desconocido", modelo)
+            base = Precios(e, s, _D("0.1"), "desconocido", modelo)
     if entrada is None and salida is None:
         return base
     return Precios(
-        D(entrada) if entrada is not None else base.entrada,
-        D(salida) if salida is not None else base.salida,
+        _D(entrada) if entrada is not None else base.entrada,
+        _D(salida) if salida is not None else base.salida,
         base.lectura_cache,
         "manual",
         modelo,
@@ -204,7 +204,7 @@ def soporta_esfuerzo(modelo: str, nivel: Optional[str] = None) -> Optional[bool]
 # ----------------------------------------------------------------------
 
 
-def _n(obj: Any, nombre: str) -> int:
+def _contador(obj: Any, nombre: str) -> int:
     """Lee un contador de tokens de un objeto `usage` sin fiarse de que exista."""
     valor = getattr(obj, nombre, 0)
     if isinstance(valor, bool) or not isinstance(valor, (int, float, Decimal)):
@@ -231,29 +231,29 @@ def leer_consumo(uso: Any) -> Consumo:
     """Convierte el `usage` de la API (o un doble de test) en un `Consumo`."""
     if uso is None:
         return Consumo()
-    escritura = _n(uso, "cache_creation_input_tokens")
+    escritura = _contador(uso, "cache_creation_input_tokens")
     desglose = getattr(uso, "cache_creation", None)
-    w5 = _n(desglose, "ephemeral_5m_input_tokens") if desglose is not None else 0
-    w1 = _n(desglose, "ephemeral_1h_input_tokens") if desglose is not None else 0
+    w5 = _contador(desglose, "ephemeral_5m_input_tokens") if desglose is not None else 0
+    w1 = _contador(desglose, "ephemeral_1h_input_tokens") if desglose is not None else 0
     if w5 + w1 < escritura:
         w5 += escritura - (w5 + w1)  # sin desglose: se asume TTL de 5 minutos
     return Consumo(
-        entrada=_n(uso, "input_tokens"),
-        salida=_n(uso, "output_tokens"),
+        entrada=_contador(uso, "input_tokens"),
+        salida=_contador(uso, "output_tokens"),
         escritura_5m=w5,
         escritura_1h=w1,
-        lectura_cache=_n(uso, "cache_read_input_tokens"),
+        lectura_cache=_contador(uso, "cache_read_input_tokens"),
     )
 
 
 def coste_consumo(consumo: Consumo, precios: Precios, lote: bool = False) -> Decimal:
     e, s = precios.entrada, precios.salida
     total = (
-        D(consumo.entrada) * e
-        + D(consumo.escritura_5m) * e * ESCRITURA_CACHE_5M
-        + D(consumo.escritura_1h) * e * ESCRITURA_CACHE_1H
-        + D(consumo.lectura_cache) * e * precios.lectura_cache
-        + D(consumo.salida) * s
+        _D(consumo.entrada) * e
+        + _D(consumo.escritura_5m) * e * ESCRITURA_CACHE_5M
+        + _D(consumo.escritura_1h) * e * ESCRITURA_CACHE_1H
+        + _D(consumo.lectura_cache) * e * precios.lectura_cache
+        + _D(consumo.salida) * s
     ) / MILLON
     return total * DESCUENTO_LOTE if lote else total
 
@@ -267,7 +267,7 @@ def coste_maximo(
     max_tokens: int,
     precios: Precios,
     lote: bool = False,
-    mult_entrada: Decimal = D(1),
+    mult_entrada: Decimal = _D(1),
 ) -> Decimal:
     """Peor caso de UNA petición: toda la entrada a precio completo y `max_tokens` de salida.
 
@@ -275,8 +275,8 @@ def coste_maximo(
     cara que no cachear.
     """
     total = (
-        D(max(0, tokens_entrada)) * precios.entrada * mult_entrada
-        + D(max(0, max_tokens)) * precios.salida
+        _D(max(0, tokens_entrada)) * precios.entrada * mult_entrada
+        + _D(max(0, max_tokens)) * precios.salida
     ) / MILLON
     return total * DESCUENTO_LOTE if lote else total
 
@@ -297,12 +297,12 @@ def estimar_tokens(texto: str) -> int:
 
 
 def formatear_usd(valor: Decimal, decimales: int = 4) -> str:
-    return f"${D(valor):.{decimales}f}"
+    return f"${_D(valor):.{decimales}f}"
 
 
 def formatear_precio(valor: Decimal) -> str:
     """`$2` o `$0.80` (hasta 3 decimales, sin ceros sobrantes)."""
-    texto = f"{D(valor):.3f}".rstrip("0").rstrip(".")
+    texto = f"{_D(valor):.3f}".rstrip("0").rstrip(".")
     if "." in texto and len(texto.split(".")[1]) < 2:
         texto += "0"
     return f"${texto}"

@@ -27,6 +27,7 @@ from .pricing import (
 
 MODOS = ("inmediato", "lote")
 INTERFACES = ("simple", "avanzada")
+TEMAS = ("auto", "claro", "oscuro")  # auto = el del sistema
 MAX_TOKENS_STREAMING = 16_000  # por encima, el SDK exige streaming
 MAX_ERROR_ATTEMPTS = 8
 DELAY_BETWEEN_CYCLES_SEC = 10
@@ -94,10 +95,12 @@ class Configuracion:
     # --- Aplicación ---
     telegram_chat_id: str = ""
     auto_arranque: bool = False
-    modo_fantasma: bool = False
+    iniciar_minimizado: bool = False  # abrir directamente en la bandeja del sistema
     retencion_dias: int = 30
     interfaz: str = "simple"  # simple | avanzada
+    mostrar_formato: bool = True  # respuestas con negrita, listas, código… (el texto original no cambia)
     idioma: str = ""          # "" = el del sistema
+    tema: str = "auto"        # auto (el del sistema) | claro | oscuro
 
     # ------------------------------------------------------------------
 
@@ -178,6 +181,7 @@ class Configuracion:
 
         modo = texto("modo", base.modo)
         interfaz = texto("interfaz", base.interfaz)
+        tema = texto("tema", base.tema).strip().lower()
         esfuerzo = texto("esfuerzo", "")
         return cls(
             mensaje=texto("mensaje", ""),
@@ -204,10 +208,12 @@ class Configuracion:
             max_error_attempts=_int(data.get("max_error_attempts"), MAX_ERROR_ATTEMPTS, 1, 100),
             telegram_chat_id=texto("telegram_chat_id", ""),
             auto_arranque=bool(data.get("auto_arranque", False)),
-            modo_fantasma=bool(data.get("modo_fantasma", False)),
+            iniciar_minimizado=bool(data.get("iniciar_minimizado", False)),
             retencion_dias=_int(data.get("retencion_dias"), 30, 0, 3650),
             interfaz=interfaz if interfaz in INTERFACES else base.interfaz,
+            mostrar_formato=bool(data.get("mostrar_formato", True)),
             idioma=texto("idioma", "").strip().lower()[:5],
+            tema=tema if tema in TEMAS else base.tema,
         )
 
 

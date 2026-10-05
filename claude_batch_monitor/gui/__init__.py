@@ -6,6 +6,7 @@ import sys
 from typing import Optional
 
 from ..config import ConfigManager
+from ..platform_utils import comando_para_ejecutar
 
 
 def _activar_dpi_alto() -> None:
@@ -32,7 +33,7 @@ def modo_pedido(argv: list[str]) -> Optional[str]:
     return None
 
 
-def run(argv: Optional[list[str]] = None) -> int:
+def abrir_interfaz(argv: Optional[list[str]] = None) -> int:
     """Abre la interfaz y alterna entre los dos modos mientras la persona lo pida.
 
     Sin `--simple` ni `--avanzado` se abre el modo que se usó la última vez (la primera vez,
@@ -61,7 +62,7 @@ def run(argv: Optional[list[str]] = None) -> int:
         print(
             f"No se pudo abrir la ventana ({error}).\n"
             "Si estás en un servidor sin escritorio, usa la terminal:  "
-            "python -m claude_batch_monitor --cli --help",
+            f"{comando_para_ejecutar()} --cli --help",
             file=sys.stderr,
         )
         return 1

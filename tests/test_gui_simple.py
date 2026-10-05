@@ -199,9 +199,9 @@ class TestEnviar:
 
     def test_el_texto_de_la_respuesta_llega_por_trozos(self, raiz, con_clave):
         app = crear(raiz)
-        escribir(app, "a")
-        app.enviar()
-        bombear(raiz, lambda: filas(app))
+        app.cola.pausar()
+        app.cola.agregar("a")  # en la cola pero sin enviar (`enviar()` reanudaría): la respuesta de verdad no se mezcla con los trozos
+        assert bombear(raiz, lambda: filas(app))
         app._seleccionar(1)
         app.on_delta(1, "Hola ")
         app.on_delta(1, "mundo")
@@ -284,6 +284,185 @@ class TestEstadosYEsperas:
             app.cola.agregar(q)
         bombear(raiz, timeout=0.2)
         assert [f[2] for f in filas(app)] == ["En cola", "En cola"]
+
+
+MARKDOWN = "# Título\n\nTexto con **fuerte** y `código`.\n\n- uno\n- dos"
+
+
+class TestRespuestasConFormato:
+    def _responder(self, raiz, config=None):
+        app = crear(raiz, guion=[FakeResponse(MARKDOWN)] * 3, config=config)
+        escribir(app, "pregunta")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == "Lista")
+        bombear(raiz, lambda: "Título" in app.respuesta.get("1.0", "end"), timeout=2)
+        return app
+
+    def test_la_respuesta_terminada_se_ve_con_formato(self, raiz, con_clave):
+        app = self._responder(raiz)
+        texto = app.respuesta.get("1.0", "end")
+        assert "**" not in texto and "`" not in texto and "# " not in texto      # sin los signos de Markdown
+        assert "Título" in texto and "fuerte" in texto and "•\tuno" in texto
+        assert app.respuesta.tag_ranges("h1") and app.respuesta.tag_ranges("negrita")
+        assert app.respuesta.tag_ranges("codigo") and app.respuesta.tag_ranges("lista0")
+
+    def test_se_lee_desde_el_principio(self, raiz, con_clave):
+        app = self._responder(raiz)
+        assert app.respuesta.yview()[0] == 0.0
+
+    def test_mientras_llega_se_ve_el_texto_tal_cual(self, raiz, con_clave):
+        app = crear(raiz)
+        app.cola.pausar()
+        app.cola.agregar("a")  # en la cola pero sin enviar (`enviar()` reanudaría y la respuesta de verdad se mezclaría)
+        assert bombear(raiz, lambda: filas(app), timeout=2)
+        app._seleccionar(1)
+        app.on_delta(1, "**a medias")
+        assert app.respuesta.get("1.0", "end").strip() == "**a medias"
+        assert not app.respuesta.tag_ranges("negrita")
+
+    def test_copiar_da_el_texto_original_no_el_formateado(self, raiz, con_clave):
+        app = self._responder(raiz)
+        app.copiar_respuesta()
+        assert raiz.clipboard_get() == MARKDOWN
+
+    def test_la_casilla_muestra_el_texto_original_y_se_recuerda(self, raiz, con_clave):
+        app = self._responder(raiz)
+        app.var_formato.set(False)
+        app._cambiar_formato()
+        assert "**fuerte**" in app.respuesta.get("1.0", "end") and not app.respuesta.tag_ranges("negrita")
+        assert ConfigManager.cargar().mostrar_formato is False
+        app.var_formato.set(True)
+        app._cambiar_formato()
+        assert app.respuesta.tag_ranges("negrita") and ConfigManager.cargar().mostrar_formato is True
+
+    def test_si_ya_estaba_desactivado_arranca_sin_formato(self, raiz, con_clave):
+        app = self._responder(raiz, config=cfg(mostrar_formato=False))
+        assert app.var_formato.get() is False and "**fuerte**" in app.respuesta.get("1.0", "end")
+
+    def test_un_error_no_se_formatea(self, raiz, con_clave):
+        app = crear(raiz, guion=[status_error(400)] * 3)
+        escribir(app, "a")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == "Error")
+        assert not app.respuesta.tag_ranges("negrita")
+
+
+class TestInstruccionesComunes:
+    def test_las_instrucciones_guardadas_aparecen_en_las_opciones(self, raiz, con_clave):
+        d = simple.DialogoOpciones(crear(raiz, config=cfg(system_prompt="Responde en francés.")))
+        assert d.instrucciones.get("1.0", "end-1c") == "Responde en francés."
+        d.destroy()
+
+    def test_guardar_las_opciones_las_conserva_y_se_envian_con_cada_pregunta(self, raiz, con_clave):
+        app = crear(raiz)
+        d = simple.DialogoOpciones(app)
+        d.instrucciones.insert("1.0", "  Responde siempre en español y con frases cortas.  ")
+        d.guardar()
+        assert app.config.system_prompt == "Responde siempre en español y con frases cortas."
+        assert ConfigManager.cargar().system_prompt == "Responde siempre en español y con frases cortas."
+        escribir(app, "¿Qué es un token?")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == "Lista")
+        peticion = app.fab.cliente.messages.peticiones[0]
+        assert peticion["system"][0]["text"] == "Responde siempre en español y con frases cortas."
+
+    def test_vaciar_el_cuadro_quita_las_instrucciones(self, raiz, con_clave):
+        app = crear(raiz, config=cfg(system_prompt="algo"))
+        d = simple.DialogoOpciones(app)
+        d.instrucciones.delete("1.0", "end")
+        d.guardar()
+        assert app.config.system_prompt == ""
+        escribir(app, "a")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == "Lista")
+        assert "system" not in app.fab.cliente.messages.peticiones[0]
+
+    def test_aplicar_opciones_sin_instrucciones_no_las_toca(self, raiz, con_clave):
+        app = crear(raiz, config=cfg(system_prompt="no me borres"))
+        app.aplicar_opciones(modelo="claude-sonnet-5-5", tope=D("5"), auto=False, idioma="")
+        assert app.config.system_prompt == "no me borres"
+
+
+class TestColaVacia:
+    def test_con_la_cola_vacia_se_explica_donde_iran_las_preguntas(self, raiz, con_clave):
+        app = crear(raiz)
+        assert app.vacio.winfo_manager() == "place" and app.vacio.cget("text") == t("queue_empty")
+
+    def test_el_panel_de_la_respuesta_tambien_dice_que_pasara(self, raiz, con_clave):
+        app = crear(raiz)
+        assert app.respuesta.get("1.0", "end").strip() == t("answer_placeholder")
+
+    def test_desaparece_con_la_primera_pregunta_y_vuelve_con_una_cola_nueva(self, raiz, con_clave, monkeypatch):
+        app = crear(raiz)
+        escribir(app, "a")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == "Lista")
+        assert app.vacio.winfo_manager() == ""
+        monkeypatch.setattr(app, "_confirmar", lambda titulo, texto: True)
+        app.nueva_cola()
+        assert app.vacio.winfo_manager() == "place"
+
+    def test_si_se_reabre_con_preguntas_pendientes_no_se_ve(self, raiz, con_clave):
+        app = TestCierreYReanudacion()._app_con_pendientes(raiz)
+        app._salir()
+        raiz2 = tk.Tk()
+        try:
+            app2 = crear(raiz2, guion=[FakeResponse()] * 5)
+            bombear(raiz2, timeout=0.3)
+            assert app2.vacio.winfo_manager() == ""
+        finally:
+            raiz2.destroy()
+
+
+class TestErroresInesperados:
+    @pytest.fixture
+    def avisos(self, monkeypatch):
+        vistos = []
+        monkeypatch.setattr(simple.messagebox, "showerror", lambda titulo, texto, **kw: vistos.append((titulo, texto)))
+        from claude_batch_monitor.gui import comun
+        monkeypatch.setattr(comun.messagebox, "showerror", lambda titulo, texto, **kw: vistos.append((titulo, texto)))
+        return vistos
+
+    def test_un_error_en_un_boton_se_avisa_con_el_detalle_y_la_ruta_del_registro(self, raiz, con_clave, avisos):
+        from claude_batch_monitor import paths
+        crear(raiz)
+        raiz.report_callback_exception(ValueError, ValueError("boom"), None)
+        titulo, texto = avisos[0]
+        assert titulo == "Algo ha fallado" and "ValueError: boom" in texto and str(paths.LOG_FILE) in texto
+        assert "no se ha perdido" in texto
+
+    def test_se_guarda_en_el_registro(self, raiz, con_clave, avisos, caplog):
+        crear(raiz)
+        with caplog.at_level("ERROR"):
+            try:
+                raise RuntimeError("fallo registrado")
+            except RuntimeError:
+                import sys
+                raiz.report_callback_exception(*sys.exc_info())
+        assert "Error inesperado en la ventana" in caplog.text and "fallo registrado" in caplog.text
+
+    def test_el_mismo_error_no_se_repite_en_bucle_pero_otro_distinto_si_se_avisa(self, raiz, con_clave, avisos):
+        crear(raiz)
+        for _ in range(5):
+            raiz.report_callback_exception(ValueError, ValueError("igual"), None)
+        raiz.report_callback_exception(KeyError, KeyError("otro"), None)
+        assert len(avisos) == 2
+
+    def test_un_error_real_dentro_de_un_callback_de_tk_llega_hasta_el_aviso(self, raiz, con_clave, avisos):
+        crear(raiz)
+        raiz.after(0, lambda: 1 / 0)
+        assert bombear(raiz, lambda: avisos, timeout=3)
+        assert "ZeroDivisionError" in avisos[0][1]
+
+    def test_si_avisar_falla_no_se_encadena_otro_error(self, raiz, con_clave, monkeypatch):
+        from claude_batch_monitor.gui import comun
+
+        def roto(*a, **k):
+            raise RuntimeError("sin ventanas")
+
+        monkeypatch.setattr(comun.messagebox, "showerror", roto)
+        crear(raiz)
+        raiz.report_callback_exception(ValueError, ValueError("x"), None)    # no debe lanzar
 
 
 class TestAvisos:
@@ -565,6 +744,69 @@ class TestCierreYReanudacion:
         monkeypatch.setattr(raiz, "wait_window", lambda w: None)
         app.cerrar()
         assert raiz.winfo_exists()
+
+
+class TestTema:
+    def test_en_oscuro_la_ventana_usa_la_paleta_oscura(self, raiz, con_clave):
+        from claude_batch_monitor.gui.estilo import PALETA_OSCURA
+
+        app = crear(raiz, config=cfg(tema="oscuro"))
+        assert app.p is PALETA_OSCURA
+        assert app.root.cget("background") == PALETA_OSCURA.fondo
+        assert app.entrada.cget("background") == PALETA_OSCURA.superficie
+        assert app.entrada.cget("insertbackground") == PALETA_OSCURA.texto  # el cursor se ve sobre el fondo oscuro
+
+    def test_en_claro_sigue_igual_que_siempre(self, raiz, con_clave):
+        from claude_batch_monitor.gui.estilo import PALETA_CLARA
+
+        app = crear(raiz, config=cfg(tema="claro"))
+        assert app.p is PALETA_CLARA and app.root.cget("background") == PALETA_CLARA.fondo
+
+    def test_auto_sigue_al_sistema(self, raiz, con_clave, monkeypatch):
+        from claude_batch_monitor.gui import estilo
+
+        monkeypatch.setattr(estilo, "tema_del_sistema", lambda: "oscuro")
+        assert crear(raiz, config=cfg(tema="auto")).p.oscura
+
+    def test_las_opciones_ofrecen_los_tres_temas_y_guardan_el_elegido(self, raiz, con_clave):
+        app = crear(raiz, config=cfg(tema="auto"))
+        d = simple.DialogoOpciones(app)
+        assert list(d._temas) == ["Automático", "Claro", "Oscuro"] and d.tema.get() == "Automático"
+        d.tema.set("Oscuro")
+        d.guardar()
+        assert app.config.tema == "oscuro" and ConfigManager.cargar().tema == "oscuro"
+
+    def test_las_opciones_muestran_el_tema_guardado(self, raiz, con_clave):
+        d = simple.DialogoOpciones(crear(raiz, config=cfg(tema="claro")))
+        assert d.tema.get() == "Claro"
+        d.destroy()
+
+    def test_aplicar_opciones_sin_tema_no_lo_toca_y_uno_raro_se_ignora(self, raiz, con_clave):
+        app = crear(raiz, config=cfg(tema="oscuro"))
+        app.aplicar_opciones(modelo="claude-sonnet-5-5", tope=D("5"), auto=False, idioma="")
+        assert app.config.tema == "oscuro"
+        app.aplicar_opciones(modelo="claude-sonnet-5-5", tope=D("5"), auto=False, idioma="", tema="rosa")
+        assert app.config.tema == "oscuro"
+
+    def test_los_textos_del_tema_existen_en_los_dos_idiomas(self):
+        for clave in ("opt_theme", "theme_auto", "theme_light", "theme_dark"):
+            fijar_idioma("es")
+            es = t(clave)
+            fijar_idioma("en")
+            en = t(clave)
+            assert es != clave and en != clave and es != en
+
+    def test_la_respuesta_con_formato_usa_los_colores_del_tema(self, raiz, con_clave):
+        from claude_batch_monitor.gui.estilo import PALETA_OSCURA
+
+        app = crear(raiz, config=cfg(tema="oscuro"), guion=[FakeResponse("Mira `x = 1` y [aquí](https://a.org)")])
+        escribir(app, "pregunta")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == "Lista")
+        app.tabla.selection_set(app.tabla.get_children()[0])
+        raiz.update()
+        assert app.respuesta.tag_cget("codigo", "background") == PALETA_OSCURA.codigo_fondo
+        assert app.respuesta.tag_cget("enlace", "foreground") == PALETA_OSCURA.acento_texto
 
 
 class TestIdioma:

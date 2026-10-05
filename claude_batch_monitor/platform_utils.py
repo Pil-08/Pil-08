@@ -1,4 +1,4 @@
-"""Utilidades dependientes del sistema operativo: anti-suspensión y abrir rutas."""
+"""Utilidades dependientes del sistema operativo: anti-suspensión, abrir rutas, el tema y cómo se llama Python."""
 
 from __future__ import annotations
 
@@ -95,3 +95,52 @@ def abrir_ruta(path: Path) -> bool:
     except Exception as e:
         logger.warning("No se pudo abrir %s: %s", path, e)
         return False
+
+
+def nombre_de_python() -> str:
+    """Cómo se llama Python en una terminal de este sistema: `py` en Windows, `python3` en los demás."""
+    return "py" if sys.platform == "win32" else "python3"
+
+
+def comando_para_instalar(libreria: str) -> str:
+    """El comando que se le enseña a la persona para instalar una librería a mano."""
+    return f"{nombre_de_python()} -m pip install {libreria}"
+
+
+def comando_para_ejecutar() -> str:
+    """Lo que se escribe en una terminal para abrir este programa, tal como se abrió ahora.
+
+    Sirve para los mensajes de ayuda: el archivo único (`python3 claude_batch_monitor.py`), el paquete
+    (`python3 -m claude_batch_monitor`) o el ejecutable descargado.
+    """
+    if getattr(sys, "frozen", False):
+        nombre = Path(sys.executable).name
+        return nombre if sys.platform == "win32" else f"./{nombre}"
+    if __package__:  # `python -m claude_batch_monitor`, o instalado con pip
+        return f"{nombre_de_python()} -m {__package__.split('.')[0]}"
+    return f"{nombre_de_python()} {Path(__file__).name}"  # el archivo único
+
+
+def tema_del_sistema() -> str:
+    """`oscuro` si el sistema usa el tema oscuro; `claro` en cualquier otro caso, también si no se puede saber."""
+    try:
+        if sys.platform == "win32":
+            import winreg
+
+            clave = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, clave) as abierta:
+                return "claro" if winreg.QueryValueEx(abierta, "AppsUseLightTheme")[0] else "oscuro"
+        if sys.platform == "darwin":
+            r = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"],
+                               capture_output=True, text=True, timeout=3)
+            return "oscuro" if r.stdout.strip().lower() == "dark" else "claro"
+        if shutil.which("gsettings"):  # GNOME y los que lo imitan (Ubuntu, Fedora, Cinnamon…)
+            r = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+                               capture_output=True, text=True, timeout=3)
+            if "dark" in r.stdout.lower():
+                return "oscuro"
+        if "dark" in os.environ.get("GTK_THEME", "").lower():
+            return "oscuro"
+    except Exception as e:  # solo es estética: ante la duda, claro
+        logger.info("No se pudo saber el tema del sistema: %s", e)
+    return "claro"

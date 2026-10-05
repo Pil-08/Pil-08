@@ -75,11 +75,12 @@ from ..state import (
 )
 from . import tray
 from .bridge import UiBridge
-from .comun import URL_FACTURACION, Desplazable, poner_icono
+from .comun import URL_FACTURACION, Desplazable, avisar_de_errores_inesperados, poner_icono
 from .dialogos import DialogoColumna, DialogoEstimacion, DialogoLotes, VisorRespuesta
 from .estilo import aplicar_estilo
 
 SIN_ESFUERZO = "(no enviar)"
+TEMAS_VISIBLES = {"Automático": "auto", "Claro": "claro", "Oscuro": "oscuro"}  # lo que se lee -> lo que se guarda
 MAX_LINEAS_LOG = 300
 MAX_FILAS = 20_000          # más filas que esto no hacen la tabla útil y sí lenta
 MAX_BORRADOR = 2_000_000    # el texto de la caja se guarda como borrador; un CSV enorme no se copia a config.json
@@ -115,7 +116,7 @@ def _entero(texto: str, nombre: str, minimo: int, maximo: int) -> int:
     return n
 
 
-def _decimal(texto: str, nombre: str, opcional: bool = False) -> Optional[Decimal]:
+def _decimal_de_casilla(texto: str, nombre: str, opcional: bool = False) -> Optional[Decimal]:
     limpio = str(texto).strip().replace(",", ".")
     if not limpio:
         if opcional:
@@ -147,7 +148,7 @@ def _texto_decimal(d: Optional[Decimal]) -> str:
     return format(d.normalize(), "f") if d else "0"
 
 
-def _resumen(texto: str, largo: int = 100) -> str:
+def _acortar(texto: str, largo: int = 100) -> str:
     uno = " ".join(texto.split())
     return uno if len(uno) <= largo else uno[: largo - 1] + "…"
 
@@ -156,7 +157,7 @@ def _miles(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
 
-class _Eventos(EventosLote):
+class _EventosDelLote(EventosLote):
     """Reenvía lo que cuenta el ejecutor a la ventana (ya llega en el hilo de la ventana)."""
 
     def __init__(self, app: AppAvanzada):
@@ -195,10 +196,11 @@ class AppAvanzada:
 
         root.title(f"Claude Batch Monitor v{APP_VERSION}")
         poner_icono(root)
+        avisar_de_errores_inesperados(root)
         ancho, alto = 900, min(860, max(660, root.winfo_screenheight() - 90))
         root.geometry(f"{ancho}x{alto}")
         root.minsize(780, 660)
-        self.p, self.f = aplicar_estilo(root)
+        self.p, self.f = aplicar_estilo(root, self.config.tema)
         self.bridge = UiBridge(root)
         self.ejecutor = EjecutorLote(publicar=self.bridge.publicar, fabrica=fabrica)
 
@@ -214,7 +216,7 @@ class AppAvanzada:
         self._cargando = True
         self._resumen_final_visible = False
         self.bandeja: Optional[tray.BandejaDelSistema] = None
-        self._usar_bandeja = usar_bandeja and tray.disponible()
+        self._usar_bandeja = usar_bandeja and tray.bandeja_disponible()
         self._archivo_cargado = ""
 
         self._crear_variables()
@@ -264,9 +266,9 @@ class AppAvanzada:
             "max_tokens": S(), "concurrencia": S(), "max_error_attempts": S(),
             "pausa_entre_mensajes_sec": S(), "timeout_api_sec": S(),
             "tope_gasto_usd": S(), "precio_input_mtok": S(), "precio_output_mtok": S(),
-            "hora_limite": S(), "pausa_ciclos_sec": S(), "telegram_chat_id": S(), "retencion_dias": S(),
+            "hora_limite": S(), "pausa_ciclos_sec": S(), "telegram_chat_id": S(), "retencion_dias": S(), "tema": S(),
             "usar_cache": B(), "reset_gasto_por_lote": B(), "estimar_antes_de_enviar": B(),
-            "modo_continuo": B(), "auto_arranque": B(), "modo_fantasma": B(),
+            "modo_continuo": B(), "auto_arranque": B(), "iniciar_minimizado": B(),
         }
         self.var_cuenta = tk.StringVar(value="0 órdenes detectadas")
         self.var_archivo = tk.StringVar()
@@ -409,7 +411,7 @@ class AppAvanzada:
         self.tabla.tag_configure("lista", foreground=p.ok)
         self.tabla.tag_configure("error", foreground=p.error)
         self.tabla.tag_configure("rechazada", foreground=p.aviso)
-        self.tabla.tag_configure("envio", foreground=p.acento)
+        self.tabla.tag_configure("envio", foreground=p.acento_texto)
         self.tabla.tag_configure("cola", foreground=p.apagado)
         self.tabla.bind("<Double-1>", lambda e: self.ver_respuesta())
         self.tabla.bind("<Return>", lambda e: self.ver_respuesta())
@@ -593,11 +595,13 @@ class AppAvanzada:
         ttk.Checkbutton(au, text="Al abrir el programa, iniciar o reanudar el lote sin preguntar",
                         variable=v["auto_arranque"]).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(au, text="Al abrir, empezar minimizado en la bandeja del sistema",
-                        variable=v["modo_fantasma"]).grid(row=1, column=1, sticky="w", pady=(4, 0))
+                        variable=v["iniciar_minimizado"]).grid(row=1, column=1, sticky="w", pady=(4, 0))
         self.spin_retencion = ttk.Spinbox(au, from_=0, to=3650, width=6, textvariable=v["retencion_dias"])
         self._fila(au, 2, "Conservar lotes (días)", self.spin_retencion,
                    "Los lotes más viejos se borran al abrir el programa. 0 = no borrar nunca. "
                    "Los que tienen trabajo pendiente nunca se borran.")
+        self.combo_tema = ttk.Combobox(au, textvariable=v["tema"], values=list(TEMAS_VISIBLES), state="readonly", width=14)
+        self._fila(au, 3, "Tema (al reiniciar)", self.combo_tema)
         fila_datos = ttk.Frame(au)
         ttk.Button(fila_datos, text="Abrir carpeta de datos", command=self.abrir_datos).pack(side="left")
         self._fila(au, 4, "", fila_datos)
@@ -624,7 +628,7 @@ class AppAvanzada:
         "retencion_dias": ("Conservar lotes", 0, 3650),
     }
     _BOOLEANOS = ("usar_cache", "reset_gasto_por_lote", "estimar_antes_de_enviar", "modo_continuo",
-                  "auto_arranque", "modo_fantasma")
+                  "auto_arranque", "iniciar_minimizado")
 
     def _escribir_ajustes(self, c: Configuracion) -> None:
         v = self.v
@@ -641,6 +645,7 @@ class AppAvanzada:
         v["precio_output_mtok"].set(_texto_decimal(c.precio_output_mtok))
         v["hora_limite"].set(c.hora_limite)
         v["telegram_chat_id"].set(c.telegram_chat_id)
+        v["tema"].set(next((nombre for nombre, valor in TEMAS_VISIBLES.items() if valor == c.tema), "Automático"))
         v["plantilla"].set(c.plantilla)
         for caja, valor in ((self.txt_ordenes, c.mensaje), (self.txt_sistema, c.system_prompt)):
             caja.delete("1.0", "end")
@@ -661,11 +666,12 @@ class AppAvanzada:
             esfuerzo="" if esfuerzo == SIN_ESFUERZO else esfuerzo,
             modo=v["modo"].get(),
             separador=v["separador"].get().strip() or DEFAULT_SEPARATOR,
-            tope_gasto_usd=_decimal(v["tope_gasto_usd"].get(), "Tope de gasto") or Decimal(0),
-            precio_input_mtok=_decimal(v["precio_input_mtok"].get(), "Precio de entrada", opcional=True),
-            precio_output_mtok=_decimal(v["precio_output_mtok"].get(), "Precio de salida", opcional=True),
+            tope_gasto_usd=_decimal_de_casilla(v["tope_gasto_usd"].get(), "Tope de gasto") or Decimal(0),
+            precio_input_mtok=_decimal_de_casilla(v["precio_input_mtok"].get(), "Precio de entrada", opcional=True),
+            precio_output_mtok=_decimal_de_casilla(v["precio_output_mtok"].get(), "Precio de salida", opcional=True),
             hora_limite=_hora(v["hora_limite"].get()),
             telegram_chat_id=v["telegram_chat_id"].get().strip(),
+            tema=TEMAS_VISIBLES.get(v["tema"].get(), self.config.tema),
             **enteros,
             **{campo: bool(v[campo].get()) for campo in self._BOOLEANOS},
         )
@@ -1117,7 +1123,7 @@ class AppAvanzada:
         self._ocupar(True)
         self._log(f"Lote {job.job_id}: {_miles(job.total_count())} órdenes · {c.modelo} · modo {c.modo}.")
         self._purgar(c)
-        self.ejecutor.iniciar(c, job, _Eventos(self))
+        self.ejecutor.iniciar(c, job, _EventosDelLote(self))
 
     def _purgar(self, c: Configuracion) -> None:
         try:
@@ -1174,7 +1180,7 @@ class AppAvanzada:
         estado, etiqueta = self._texto_estado(msg)
         tokens = _miles(msg.tokens_input + msg.tokens_output) if (msg.tokens_input or msg.tokens_output) else ""
         coste = formatear_usd(msg.coste_usd) if msg.coste_usd else ""
-        return (msg.id, _resumen(msg.text), estado, tokens, coste), etiqueta
+        return (msg.id, _acortar(msg.text), estado, tokens, coste), etiqueta
 
     def _poblar_resultados(self, job: Job) -> None:
         self.tabla.delete(*self.tabla.get_children())
@@ -1438,7 +1444,7 @@ class AppAvanzada:
             logger.exception("No se pudo comprobar si había un lote sin terminar")
         if not retomado and c.auto_arranque and self._ordenes(c):
             self.iniciar(confirmar=False)
-        if c.modo_fantasma and self._usar_bandeja:
+        if c.iniciar_minimizado and self._usar_bandeja:
             self._segundo_plano()
 
     def cambiar_a_simple(self) -> None:

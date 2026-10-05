@@ -7,14 +7,17 @@ from dataclasses import dataclass
 from tkinter import font as tkfont
 from tkinter import ttk
 
+from ..platform_utils import tema_del_sistema
+
 
 @dataclass(frozen=True)
 class Paleta:
+    oscura: bool = False
     fondo: str = "#f4f6f9"
     superficie: str = "#ffffff"
     borde: str = "#d5dae1"
     texto: str = "#1f2933"
-    apagado: str = "#667085"
+    apagado: str = "#5d6778"
     acento: str = "#2f6fed"
     acento_hover: str = "#2459c9"
     acento_suave: str = "#dce8ff"
@@ -31,9 +34,29 @@ class Paleta:
     banner_error_borde: str = "#f1a7a7"
     banner_info_fondo: str = "#e8f1ff"
     banner_info_borde: str = "#a9c6f7"
+    acento_texto: str = "#2459c9"  # el azul cuando es el color de un TEXTO (enlaces, «enviando…», pestaña activa)
+    deshabilitado: str = "#a3abb8"  # texto de lo que está desactivado
+    codigo_fondo: str = "#eef1f6"   # fondo del código en las respuestas
 
 
-PALETA = Paleta()
+PALETA_CLARA = Paleta()
+PALETA_OSCURA = Paleta(
+    oscura=True, fondo="#161a21", superficie="#1f242d", borde="#323a48", texto="#e5e9f0", apagado="#9aa4b5",
+    acento="#3566d6", acento_hover="#3f6fe3", acento_suave="#2a3c60", acento_desactivado="#2c4070",
+    boton="#2a313d", boton_hover="#363f4f", ok="#4ade80", aviso="#fbbf24", error="#f87171", gris="#8b95a7",
+    banner_aviso_fondo="#3a2e16", banner_aviso_borde="#7a5b1c",
+    banner_error_fondo="#3c1f22", banner_error_borde="#843c40",
+    banner_info_fondo="#1d2b47", banner_info_borde="#38558f",
+    acento_texto="#7aa2ff", deshabilitado="#6b7587", codigo_fondo="#2a3140",
+)
+PALETA = PALETA_CLARA  # la de siempre: lo que usan las pruebas y los valores por omisión
+
+
+def elegir_paleta(tema: str = "auto") -> Paleta:
+    """La paleta de un tema: `auto` sigue al sistema (y si no se puede saber, claro)."""
+    if tema == "auto":
+        tema = tema_del_sistema()
+    return PALETA_OSCURA if tema == "oscuro" else PALETA_CLARA
 
 
 @dataclass
@@ -47,9 +70,9 @@ class Fuentes:
     mono: tkfont.Font
 
 
-def aplicar_estilo(root: tk.Misc) -> tuple[Paleta, Fuentes]:
+def aplicar_estilo(root: tk.Misc, tema: str = "auto") -> tuple[Paleta, Fuentes]:
     """Aplica el tema a la ventana y devuelve la paleta y las fuentes para usarlas en los widgets."""
-    p = PALETA
+    p = elegir_paleta(tema)
     estilo = ttk.Style(root)
     if "clam" in estilo.theme_names():
         estilo.theme_use("clam")  # el único tema de ttk que deja recolorear todo igual en cada SO
@@ -83,12 +106,12 @@ def aplicar_estilo(root: tk.Misc) -> tuple[Paleta, Fuentes]:
                      bordercolor=p.borde, lightcolor=p.boton, darkcolor=p.boton, relief="flat")
     estilo.map("TButton",
                background=[("disabled", p.boton), ("active", p.boton_hover), ("pressed", p.boton_hover)],
-               foreground=[("disabled", "#a3abb8")],
+               foreground=[("disabled", p.deshabilitado)],
                lightcolor=[("active", p.boton_hover)], darkcolor=[("active", p.boton_hover)])
     estilo.configure("TMenubutton", padding=(14, 7), background=p.boton, foreground=p.texto,
                      arrowcolor=p.apagado, bordercolor=p.borde, relief="flat")
     estilo.map("TMenubutton", background=[("disabled", p.boton), ("active", p.boton_hover)],
-               foreground=[("disabled", "#a3abb8")])
+               foreground=[("disabled", p.deshabilitado)])
     estilo.configure("Primary.TButton", background=p.acento, foreground="#ffffff", font=fuentes.negrita,
                      bordercolor=p.acento, lightcolor=p.acento, darkcolor=p.acento)
     estilo.map("Primary.TButton",
@@ -97,7 +120,7 @@ def aplicar_estilo(root: tk.Misc) -> tuple[Paleta, Fuentes]:
                foreground=[("disabled", "#ffffff")],
                lightcolor=[("active", p.acento_hover)], darkcolor=[("active", p.acento_hover)],
                bordercolor=[("active", p.acento_hover)])
-    estilo.configure("Enlace.TButton", background=p.fondo, foreground=p.acento, padding=(6, 3),
+    estilo.configure("Enlace.TButton", background=p.fondo, foreground=p.acento_texto, padding=(6, 3),
                      lightcolor=p.fondo, darkcolor=p.fondo, bordercolor=p.fondo)
     estilo.map("Enlace.TButton", foreground=[("active", p.acento_hover)],
                background=[("active", p.fondo)])
@@ -112,7 +135,8 @@ def aplicar_estilo(root: tk.Misc) -> tuple[Paleta, Fuentes]:
 
     for nombre in ("TEntry", "TCombobox", "TSpinbox"):
         estilo.configure(nombre, fieldbackground=p.superficie, foreground=p.texto, bordercolor=p.borde,
-                         lightcolor=p.borde, darkcolor=p.borde, padding=6)
+                         lightcolor=p.borde, darkcolor=p.borde, padding=6, insertcolor=p.texto,
+                         selectbackground=p.acento_suave, selectforeground=p.texto, arrowcolor=p.apagado)
     estilo.map("TCombobox", fieldbackground=[("readonly", p.superficie)],
                selectbackground=[("readonly", p.superficie)], selectforeground=[("readonly", p.texto)])
     estilo.configure("TCheckbutton", background=p.fondo, foreground=p.texto)
@@ -120,16 +144,18 @@ def aplicar_estilo(root: tk.Misc) -> tuple[Paleta, Fuentes]:
     estilo.configure("TLabelframe", background=p.fondo, bordercolor=p.borde, lightcolor=p.borde,
                      darkcolor=p.borde, relief="solid", borderwidth=1)
     estilo.configure("TLabelframe.Label", background=p.fondo, foreground=p.apagado, font=fuentes.negrita)
-    estilo.configure("TNotebook", background=p.fondo, borderwidth=0, tabmargins=(0, 4, 0, 0))
+    estilo.configure("TNotebook", background=p.fondo, borderwidth=0, tabmargins=(0, 4, 0, 0),
+                     bordercolor=p.borde, lightcolor=p.borde, darkcolor=p.borde)
     estilo.configure("TNotebook.Tab", background=p.boton, foreground=p.apagado, padding=(20, 8),
-                     font=fuentes.negrita, borderwidth=0)
+                     font=fuentes.negrita, borderwidth=0, bordercolor=p.borde, lightcolor=p.boton, darkcolor=p.boton)
     estilo.map("TNotebook.Tab", background=[("selected", p.superficie), ("active", p.boton_hover)],
-               foreground=[("selected", p.acento)])
-    estilo.configure("Interior.TNotebook", background=p.fondo, borderwidth=0, tabmargins=(0, 2, 0, 0))
+               foreground=[("selected", p.acento_texto)])
+    estilo.configure("Interior.TNotebook", background=p.fondo, borderwidth=0, tabmargins=(0, 2, 0, 0),
+                     bordercolor=p.borde, lightcolor=p.borde, darkcolor=p.borde)
     estilo.configure("Interior.TNotebook.Tab", background=p.boton, foreground=p.apagado, padding=(14, 5),
-                     font=fuentes.base, borderwidth=0)
+                     font=fuentes.base, borderwidth=0, bordercolor=p.borde, lightcolor=p.boton, darkcolor=p.boton)
     estilo.map("Interior.TNotebook.Tab", background=[("selected", p.superficie), ("active", p.boton_hover)],
-               foreground=[("selected", p.acento)])
+               foreground=[("selected", p.acento_texto)])
     estilo.configure("TPanedwindow", background=p.fondo)
     estilo.configure("Sash", sashthickness=10, handlesize=0)
     estilo.configure("TScrollbar", background=p.boton, bordercolor=p.fondo, arrowcolor=p.apagado,
@@ -137,11 +163,31 @@ def aplicar_estilo(root: tk.Misc) -> tuple[Paleta, Fuentes]:
     estilo.configure("Horizontal.TProgressbar", background=p.acento, troughcolor=p.boton,
                      bordercolor=p.fondo, lightcolor=p.acento, darkcolor=p.acento)
 
-    # Selectores y menús desplegables de los combobox (son widgets Tk, no ttk).
+    if p.oscura:
+        # Con el fondo oscuro, las casillas y los botones de opción por defecto (cuadro blanco, marca negra) desentonan.
+        for nombre in ("TCheckbutton", "TRadiobutton"):
+            estilo.configure(nombre, indicatorbackground=p.superficie, indicatorforeground=p.texto,
+                             upperbordercolor=p.borde, lowerbordercolor=p.borde)
+            estilo.map(nombre, background=[("active", p.fondo)],
+                       indicatorbackground=[("selected", p.acento), ("pressed", p.boton_hover)],
+                       indicatorforeground=[("selected", "#ffffff"), ("disabled", p.deshabilitado)],
+                       foreground=[("disabled", p.deshabilitado)])
+        estilo.configure("TSeparator", background=p.borde)
+
+    # Selectores y menús desplegables de los combobox y cuadros de texto (son widgets Tk, no ttk).
     root.option_add("*TCombobox*Listbox.background", p.superficie)
     root.option_add("*TCombobox*Listbox.foreground", p.texto)
     root.option_add("*TCombobox*Listbox.selectBackground", p.acento_suave)
     root.option_add("*TCombobox*Listbox.selectForeground", p.texto)
+    for clase in ("Text", "Entry", "Listbox"):
+        root.option_add(f"*{clase}.selectBackground", p.acento_suave)
+        root.option_add(f"*{clase}.selectForeground", p.texto)
+        root.option_add(f"*{clase}.inactiveSelectBackground", p.acento_suave)
+    root.option_add("*Menu.background", p.superficie)
+    root.option_add("*Menu.foreground", p.texto)
+    root.option_add("*Menu.activeBackground", p.acento_suave)
+    root.option_add("*Menu.activeForeground", p.texto)
+    root.option_add("*Menu.disabledForeground", p.deshabilitado)
     return p, fuentes
 
 

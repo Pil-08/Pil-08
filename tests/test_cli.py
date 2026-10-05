@@ -361,10 +361,35 @@ class TestPuntoDeEntrada:
         err = capsys.readouterr().err
         assert "tkinter" in err and "python3-tk" in err and "--cli" in err
 
-    def test_sin_anthropic_explica_que_instalar(self, capsys, monkeypatch):
+    def test_sin_anthropic_ofrece_instalarla_en_vez_de_morir(self, monkeypatch):
+        from claude_batch_monitor import instalacion
+        llamadas = []
         monkeypatch.setitem(sys.modules, "anthropic", None)
-        assert punto_de_entrada.main([]) == 1
-        assert "pip install anthropic" in capsys.readouterr().err
+        monkeypatch.setattr(instalacion, "resolver_falta_de_la_libreria", lambda terminal: llamadas.append(terminal) or 7)
+        assert punto_de_entrada.main([]) == 7                       # la ventana: se ofrece con un botón
+        assert punto_de_entrada.main(["--cli", "--mensaje", "x"]) == 7   # la terminal: con una pregunta
+        assert llamadas == [False, True]
+
+    def test_version_ayuda_estimar_y_listar_no_necesitan_la_libreria(self, capsys, monkeypatch):
+        from claude_batch_monitor import instalacion
+        monkeypatch.setitem(sys.modules, "anthropic", None)
+        monkeypatch.setattr(instalacion, "resolver_falta_de_la_libreria", lambda terminal: pytest.fail("no debía ofrecerse"))
+        assert punto_de_entrada.main(["--version"]) == 0
+        assert punto_de_entrada.main(["--cli", "--mensaje", "hola", "--dry-run"]) == 0
+        assert punto_de_entrada.main(["--cli", "--listar"]) == 0
+        assert "Claude Batch Monitor" in capsys.readouterr().out
+
+    def test_en_un_python_sin_la_libreria_de_verdad_lo_basico_funciona(self):
+        # Un intérprete nuevo en el que `import anthropic` falla desde el principio (no solo en esta prueba).
+        import subprocess
+        codigo = (
+            "import sys; sys.modules['anthropic'] = None\n"
+            "from claude_batch_monitor.__main__ import main\n"
+            "raise SystemExit(main(sys.argv[1:]))"
+        )
+        for args in (["--version"], ["--cli", "--mensaje", "hola", "--dry-run"], ["--cli", "--help"]):
+            r = subprocess.run([sys.executable, "-c", codigo, *args], capture_output=True, text=True, timeout=60)
+            assert r.returncode == 0, (args, r.stderr[-400:])
 
     def test_un_ejecutable_sin_consola_no_puede_usarse_desde_la_terminal(self, monkeypatch):
         avisos = []
@@ -376,12 +401,60 @@ class TestPuntoDeEntrada:
     def test_el_aviso_sin_consola_no_falla_fuera_de_windows(self):
         punto_de_entrada._avisar_sin_consola()        # no hay `ctypes.windll`: debe pasar en silencio
 
+    def test_un_error_inesperado_al_abrir_la_ventana_se_explica_en_vez_de_cerrarse_en_silencio(self, monkeypatch, capsys, caplog):
+        pytest.importorskip("tkinter")
+        from tkinter import messagebox
+
+        import claude_batch_monitor.gui as gui
+        from claude_batch_monitor import paths
+
+        def revienta(argv):
+            raise RuntimeError("config rota")
+
+        mostrados = []
+        aviso_real = punto_de_entrada._avisar_de_error_fatal
+        monkeypatch.setattr(gui, "abrir_interfaz", revienta)
+        monkeypatch.setattr(punto_de_entrada, "_avisar_de_error_fatal", lambda e: mostrados.append(e) or 1)
+        assert punto_de_entrada.main([]) == 1
+        assert [str(e) for e in mostrados] == ["config rota"]
+
+        # y el aviso en sí: se anota en el registro, se imprime y se enseña una ventana con la ruta del registro
+        ventanas = []
+        import tkinter
+
+        class RaizFalsa:
+            def withdraw(self): pass
+            def destroy(self): pass
+
+        monkeypatch.setattr(tkinter, "Tk", RaizFalsa)
+        monkeypatch.setattr(messagebox, "showerror", lambda titulo, texto, **kw: ventanas.append((titulo, texto)))
+        try:
+            raise RuntimeError("config rota")
+        except RuntimeError as error:
+            assert aviso_real(error) == 1
+        assert len(ventanas) == 1
+        titulo, texto = ventanas[0]
+        assert "RuntimeError: config rota" in texto and str(paths.LOG_FILE) in texto
+        assert "config rota" in capsys.readouterr().err
+        assert any("error inesperado" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
+
+    def test_si_ni_la_ventana_de_error_se_puede_abrir_el_aviso_no_empeora_las_cosas(self, monkeypatch, capsys):
+        pytest.importorskip("tkinter")
+        import tkinter
+
+        def sin_pantalla(*a, **kw):
+            raise tkinter.TclError("no display")
+
+        monkeypatch.setattr(tkinter, "Tk", sin_pantalla)
+        assert punto_de_entrada._avisar_de_error_fatal(RuntimeError("x")) == 1
+        assert "RuntimeError" in capsys.readouterr().err
+
     def test_sin_consola_la_interfaz_grafica_si_arranca(self, monkeypatch):
         # Lo normal en un .exe «windowed»: sin argumentos no hay terminal que echar de menos.
         monkeypatch.setattr(sys, "stdout", None)
         monkeypatch.setattr(sys, "stderr", None)
         llamado = []
         import claude_batch_monitor.gui as gui
-        monkeypatch.setattr(gui, "run", lambda argv: llamado.append(argv) or 0)
+        monkeypatch.setattr(gui, "abrir_interfaz", lambda argv: llamado.append(argv) or 0)
         pytest.importorskip("tkinter")
         assert punto_de_entrada.main([]) == 0 and llamado == [[]]

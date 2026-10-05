@@ -18,6 +18,7 @@ import pytest  # noqa: E402
 
 from claude_batch_monitor import paths, platform_utils, state  # noqa: E402
 from claude_batch_monitor.core import base  # noqa: E402
+from claude_batch_monitor.gui import i18n  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +29,9 @@ def datos_aislados(request, tmp_path, monkeypatch):
     if "keepawake_real" not in request.keywords:
         monkeypatch.setattr(platform_utils.KeepAwake, "enable", lambda self: None)
         monkeypatch.setattr(platform_utils.KeepAwake, "disable", lambda self: None)
+    # El idioma del equipo de quien ejecute las pruebas no puede cambiar los textos que se esperan.
+    if "idioma_real" not in request.keywords:
+        monkeypatch.setattr(i18n, "_codigos_del_sistema", lambda: [])
     respuestas = tmp_path / "responses"
     respuestas.mkdir()
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import locale
 import os
+import re
+import subprocess
 import sys
 
 IDIOMAS = ("es", "en")
@@ -31,6 +33,7 @@ TEXTOS: dict[str, dict[str, str]] = {
         "answer_empty": "Selecciona una pregunta de la cola para ver su respuesta.",
         "answer_waiting": "Esperando la respuesta…",
         "copy": "Copiar",
+        "format": "Con formato",
         "copied": "Copiado.",
         "save_all": "Guardar todo…",
         "new_queue": "Nueva cola",
@@ -110,6 +113,17 @@ TEXTOS: dict[str, dict[str, str]] = {
         "opt_cap_help": "La cola se detiene al llegar a este gasto. 0 = sin tope (no recomendado).",
         "opt_autostart": "Continuar sola lo pendiente al abrir el programa",
         "opt_language": "Idioma (al reiniciar)",
+        "opt_theme": "Tema (al reiniciar)",
+        "theme_auto": "Automático",
+        "theme_light": "Claro",
+        "theme_dark": "Oscuro",
+        "opt_instructions": "Instrucciones para todas las respuestas (opcional)",
+        "opt_instructions_help": "Por ejemplo: «Responde siempre en español y con frases cortas». Se envían con cada pregunta.",
+        "queue_empty": "Aquí irán apareciendo tus preguntas, de una en una.",
+        "answer_placeholder": "Aquí verás la respuesta, escribiéndose en directo.",
+        "unexpected_title": "Algo ha fallado",
+        "unexpected_text": "Ha ocurrido un error inesperado dentro del programa. Lo que ya estaba guardado no se ha perdido.\n\n"
+                           "{error}\n\nEl detalle está en el registro: {log}",
         "opt_advanced": "Modo avanzado…",
         "opt_folder": "Abrir carpeta de respuestas",
         "opt_save": "Guardar",
@@ -132,6 +146,25 @@ TEXTOS: dict[str, dict[str, str]] = {
         "tray_open": "Abrir",
         "tray_quit": "Salir",
         "no_key_title": "Falta la clave",
+        # instalación de la librería que falta
+        "install_title": "Falta una pieza",
+        "install_text": "Para hablar con Claude, este programa necesita la librería oficial de Anthropic "
+                        "(se llama «anthropic»). Se instala una sola vez, con este comando, y no se instala nada más:",
+        "install_ask": "¿Instalarla ahora? [s/N] ",
+        "install_button": "Instalar ahora",
+        "install_quit": "Salir",
+        "install_working": "Instalando… puede tardar un minuto.",
+        "install_done": "Listo. Abriendo el programa…",
+        "install_failed": "No se pudo instalar.",
+        "install_copy": "Copiar comando",
+        "install_retry": "Reintentar",
+        "install_manual": "También puedes hacerlo tú en una terminal con el comando de arriba y volver a abrir el programa.",
+        "install_loop": "La instalación terminó, pero Python sigue sin encontrar la librería «anthropic». "
+                        "Instálala a mano con: {comando}",
+        # error que nadie esperaba al abrir el programa
+        "fatal_title": "No se pudo abrir el programa",
+        "fatal_text": "Ha ocurrido un error inesperado y el programa se ha cerrado.",
+        "fatal_log": "Los detalles están en este archivo (si pides ayuda, adjúntalo):\n{ruta}",
     },
     "en": {
         "app_title": "Claude · Question queue",
@@ -150,6 +183,7 @@ TEXTOS: dict[str, dict[str, str]] = {
         "answer_empty": "Select a question in the queue to see its answer.",
         "answer_waiting": "Waiting for the answer…",
         "copy": "Copy",
+        "format": "Formatted",
         "copied": "Copied.",
         "save_all": "Save all…",
         "new_queue": "New queue",
@@ -227,6 +261,17 @@ TEXTOS: dict[str, dict[str, str]] = {
         "opt_cap_help": "The queue stops when it reaches this spend. 0 = no cap (not recommended).",
         "opt_autostart": "Carry on with what's pending when the program opens",
         "opt_language": "Language (on restart)",
+        "opt_theme": "Theme (on restart)",
+        "theme_auto": "Automatic",
+        "theme_light": "Light",
+        "theme_dark": "Dark",
+        "opt_instructions": "Instructions for every answer (optional)",
+        "opt_instructions_help": "For example: “Always answer in English, in short sentences.” They are sent with every question.",
+        "queue_empty": "Your questions will appear here, one by one.",
+        "answer_placeholder": "You will see the answer here, as it is written.",
+        "unexpected_title": "Something went wrong",
+        "unexpected_text": "An unexpected error happened inside the program. Nothing that was already saved has been lost.\n\n"
+                           "{error}\n\nThe details are in the log: {log}",
         "opt_advanced": "Advanced mode…",
         "opt_folder": "Open the answers folder",
         "opt_save": "Save",
@@ -248,34 +293,68 @@ TEXTOS: dict[str, dict[str, str]] = {
         "tray_open": "Open",
         "tray_quit": "Quit",
         "no_key_title": "Missing key",
+        # installing the missing library
+        "install_title": "One piece is missing",
+        "install_text": "To talk to Claude, this program needs Anthropic's official library (called “anthropic”). "
+                        "It is installed once, with this command, and nothing else is installed:",
+        "install_ask": "Install it now? [y/N] ",
+        "install_button": "Install now",
+        "install_quit": "Quit",
+        "install_working": "Installing… this can take a minute.",
+        "install_done": "Done. Opening the program…",
+        "install_failed": "The installation failed.",
+        "install_copy": "Copy command",
+        "install_retry": "Try again",
+        "install_manual": "You can also run the command above yourself in a terminal and open the program again.",
+        "install_loop": "The installation finished, but Python still cannot find the “anthropic” library. "
+                        "Install it by hand with: {comando}",
+        # an error nobody expected while opening the program
+        "fatal_title": "The program could not start",
+        "fatal_text": "An unexpected error happened and the program has closed.",
+        "fatal_log": "The details are in this file (attach it if you ask for help):\n{ruta}",
     },
 }
 
 
-def idioma_del_sistema() -> str:
-    """'es' o 'en' según el idioma de la interfaz del sistema; 'es' si no se puede saber."""
-    candidatos: list[str] = []
-    if sys.platform == "win32":
-        try:
+def _idioma_de(codigo: str) -> str:
+    """`es` o `en` si el código de idioma (es_ES.UTF-8, en-US, Spanish_Spain…) dice uno de los dos; si no, "".
+
+    `C` y `POSIX` no dicen ningún idioma.
+    """
+    codigo = (codigo or "").strip().lower()
+    for idioma, nombre in (("es", "spanish"), ("en", "english")):
+        if re.match(rf"^({idioma}|{nombre})([_\-.@:]|$)", codigo):
+            return idioma
+    return ""
+
+
+def _codigos_del_sistema() -> list[str]:
+    """Los códigos de idioma que el sistema declara, del más al menos fiable."""
+    codigos: list[str] = []
+    try:
+        if sys.platform == "win32":
             import ctypes
 
             lcid = ctypes.windll.kernel32.GetUserDefaultUILanguage()  # type: ignore[attr-defined]
-            candidatos.append(locale.windows_locale.get(lcid, ""))
-        except Exception:
-            pass
-    for var in ("LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"):
-        if os.environ.get(var):
-            candidatos.append(os.environ[var])
-    try:
-        candidatos.append(locale.getlocale()[0] or "")
+            codigos.append(locale.windows_locale.get(lcid, ""))
+        elif sys.platform == "darwin":
+            # Un programa abierto con doble clic no recibe LANG: el idioma está en los ajustes del sistema.
+            r = subprocess.run(["defaults", "read", "-g", "AppleLanguages"],
+                               capture_output=True, text=True, timeout=3)
+            lineas = [linea.strip(' ",()') for linea in r.stdout.splitlines()]  # ("es-ES", "en-US") -> es-ES, en-US
+            codigos += [linea for linea in lineas if linea][:3]
     except Exception:
         pass
-    for c in candidatos:
-        c = (c or "").lower()
-        if c.startswith("es"):
-            return "es"
-        if c.startswith("en"):
-            return "en"
+    codigos += [os.environ[v] for v in ("LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE") if os.environ.get(v)]
+    return codigos
+
+
+def idioma_del_sistema() -> str:
+    """`es` o `en` según el idioma del sistema; `es` si no se puede saber (o es otro idioma)."""
+    for codigo in _codigos_del_sistema():
+        idioma = _idioma_de(codigo)
+        if idioma:
+            return idioma
     return "es"
 
 

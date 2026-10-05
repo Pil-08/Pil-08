@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-batch-monitor"
-version = "12.1.0"
+version = "12.2.0"
 description = "Desktop queue for Claude: write questions, auto-resume after limits, hard spend cap. GUI and CLI."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -50,15 +50,13 @@ packages = [
     "claude_batch_monitor.gui",
 ]
 
-[tool.setuptools.package-data]
-"claude_batch_monitor.gui" = ["icono.png"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
     "gui: needs tkinter and a display (use xvfb-run on Linux servers)",
     "keepawake_real: exercises the real KeepAwake class (every other test stubs it out)",
+    "idioma_real: looks at the real system language (every other test pins it to Spanish)",
 ]
 
 [tool.ruff]

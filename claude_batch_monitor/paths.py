@@ -5,9 +5,8 @@ Todo el estado persistente del programa pasa por aquí. `write_atomic` es la
 `replace()`, que es atómico en todos los SO soportados. Un corte a mitad de
 escritura deja el fichero anterior intacto en vez de uno truncado.
 
-Los demás módulos acceden a las rutas como `paths.RESPONSES_DIR`, `paths.STATE_FILE`…
-(en tiempo de llamada, no de importación), de modo que los tests pueden
-redirigirlas con un único `monkeypatch` sobre este módulo.
+Los demás módulos leen estas rutas (`RESPONSES_DIR`, `STATE_FILE`…) en el momento de usarlas, no al
+importar, de modo que los tests pueden redirigirlas todas con un único `monkeypatch`.
 """
 
 from __future__ import annotations
@@ -21,7 +20,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 APP_NAME = "ClaudeMonitor"
-APP_VERSION = "12.1.0"
+APP_VERSION = "12.2.0"
+__version__ = APP_VERSION
 
 # Variable de entorno para guardar los datos en otro sitio (modo portátil, Docker,
 # tests). Si no existe se usa el directorio estándar del SO.

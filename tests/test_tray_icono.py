@@ -8,8 +8,6 @@ import pytest
 from claude_batch_monitor.gui import tray
 from claude_batch_monitor.gui.tray import BandejaDelSistema
 
-PIL = pytest.importorskip("PIL")
-
 
 class IconoFalso:
     creados = []
@@ -37,38 +35,72 @@ def pystray_falso(monkeypatch):
     return modulo
 
 
+def _leer_png(datos: bytes):
+    """Decodificador mínimo (solo RGBA de 8 bits sin filtro): así la prueba no depende de Pillow."""
+    import struct
+    import zlib
+
+    assert datos[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, idat, ancho, alto = 8, b"", 0, 0
+    while pos < len(datos):
+        largo, tipo = struct.unpack(">I4s", datos[pos:pos + 8])
+        cuerpo = datos[pos + 8:pos + 8 + largo]
+        crc = struct.unpack(">I", datos[pos + 8 + largo:pos + 12 + largo])[0]
+        assert crc == zlib.crc32(tipo + cuerpo) & 0xFFFFFFFF, f"CRC mal en {tipo}"
+        if tipo == b"IHDR":
+            ancho, alto, profundidad, color = struct.unpack(">IIBB", cuerpo[:10])
+            assert (profundidad, color) == (8, 6)
+        elif tipo == b"IDAT":
+            idat += cuerpo
+        pos += 12 + largo
+    crudo = zlib.decompress(idat)
+    paso = 1 + ancho * 4
+    assert len(crudo) == alto * paso
+    pixel = lambda x, y: tuple(crudo[y * paso + 1 + x * 4:y * paso + 5 + x * 4])  # noqa: E731
+    return ancho, alto, pixel
+
+
 class TestIcono:
-    def test_el_dibujo_es_cuadrado_y_con_transparencia(self):
-        from claude_batch_monitor.gui.icono import dibujar
-        img = dibujar(64)
-        assert img.size == (64, 64) and img.mode == "RGBA"
-        assert img.getpixel((0, 0))[3] == 0                       # las esquinas son transparentes
-        r, g, b, a = img.getpixel((32, 12))
-        assert a == 255 and b > r                                  # el cuerpo es azul
+    def test_es_un_png_valido_y_cuadrado_del_tamano_pedido(self):
+        from claude_batch_monitor.gui.icono import png_del_icono
+        for tamano in (16, 64):
+            ancho, alto, _ = _leer_png(png_del_icono(tamano))
+            assert (ancho, alto) == (tamano, tamano)
 
-    def test_el_png_de_la_ventana_existe_y_es_valido(self):
-        from PIL import Image
+    def test_las_esquinas_son_transparentes_el_cuerpo_azul_y_las_barras_blancas(self):
+        from claude_batch_monitor.gui.icono import png_del_icono
+        _, _, pixel = _leer_png(png_del_icono(64))
+        assert pixel(0, 0)[3] == 0                                     # esquina fuera del cuadrado redondeado
+        r, g, b, a = pixel(32, 56)
+        assert a == 255 and b > r and b > 200                           # cuerpo azul y opaco
+        assert pixel(20, 21) == (255, 255, 255, 255)                    # primera barra, blanca
 
-        from claude_batch_monitor.gui.icono import RUTA_PNG
-        assert RUTA_PNG.is_file()
-        with Image.open(RUTA_PNG) as img:
-            assert img.size == (256, 256)
+    def test_es_determinista_y_no_toca_el_disco(self):
+        from claude_batch_monitor.gui.icono import png_del_icono
+        assert png_del_icono(32) == png_del_icono(32)
+
+    def test_pillow_lo_abre_para_la_bandeja(self):
+        pytest.importorskip("PIL")
+        from claude_batch_monitor.gui.icono import imagen_pil
+        img = imagen_pil(64)
+        assert img.size == (64, 64) and img.mode == "RGBA" and img.getpixel((0, 0))[3] == 0
 
     def test_la_bandeja_reutiliza_el_mismo_dibujo(self):
-        assert tray._imagen().size == (64, 64)
+        pytest.importorskip("PIL")
+        assert tray._imagen_de_bandeja().size == (64, 64)
 
 
 class TestDisponible:
     def test_con_las_librerias_instaladas(self, pystray_falso):
-        assert tray.disponible() is True
+        assert tray.bandeja_disponible() is True
 
     def test_sin_pystray(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "pystray", None)       # None en sys.modules = ImportError al importar
-        assert tray.disponible() is False
+        assert tray.bandeja_disponible() is False
 
     def test_sin_pillow(self, pystray_falso, monkeypatch):
         monkeypatch.setitem(sys.modules, "PIL.Image", None)
-        assert tray.disponible() is False
+        assert tray.bandeja_disponible() is False
 
 
 class TestBandeja:

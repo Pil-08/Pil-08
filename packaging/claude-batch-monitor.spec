@@ -35,7 +35,7 @@ a = Analysis(  # noqa: F821
     [str(RAIZ / "packaging" / "launcher.py")],
     pathex=[str(RAIZ)],
     binaries=[],
-    datas=[(str(RAIZ / "claude_batch_monitor" / "gui" / "icono.png"), "claude_batch_monitor/gui")],
+    datas=[],
     hiddenimports=imports_ocultos,
     hookspath=[],
     runtime_hooks=[],

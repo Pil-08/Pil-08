@@ -18,18 +18,17 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
-import anthropic
-
 from ..config import Configuracion
 from ..job import STATUS_PENDING, Job, JobMessage
 from ..paths import logger
 from ..pricing import formatear_usd
-from .base import (
+from .base import (  # `anthropic` viene de aquí: base.py decide qué hacer si la librería no está
     Callbacks,
     Contadores,
     Decision,
     EngineBase,
     StopReason,
+    anthropic,
     build_request_params,
 )
 

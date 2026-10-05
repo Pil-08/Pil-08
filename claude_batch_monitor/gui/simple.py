@@ -25,7 +25,7 @@ from ..claves import (
     probar_clave,
 )
 from ..cola import Cola, EstadoCola, EventosCola
-from ..config import ConfigManager, Configuracion, a_decimal
+from ..config import TEMAS, ConfigManager, Configuracion, a_decimal
 from ..core.base import StopReason
 from ..core.sequential import SequentialEngine
 from ..export import ErrorDeExportacion, exportar, leer_respuesta
@@ -46,9 +46,9 @@ from ..pricing import (
     soporta_esfuerzo,
 )
 from ..state import obtener_api_key, origen_api_key
-from . import tray
+from . import formato, tray
 from .bridge import UiBridge
-from .comun import URL_CONSOLA, URL_FACTURACION, Modal, poner_icono
+from .comun import URL_CONSOLA, URL_FACTURACION, Modal, avisar_de_errores_inesperados, poner_icono
 from .estilo import aplicar_estilo, tarjeta
 from .i18n import fijar_idioma, t
 
@@ -76,7 +76,7 @@ def config_inicial() -> Configuracion:
     return config
 
 
-class _Eventos(EventosCola):
+class _EventosDeLaCola(EventosCola):
     """Reenvía los eventos de la cola a la ventana (ya están en el hilo de la ventana)."""
 
     def __init__(self, app: SimpleApp):
@@ -204,39 +204,57 @@ class DialogoOpciones(Modal):
         self.precio.grid(row=5, column=0, sticky="w", pady=(4, 0))
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.precio.configure(text=descripcion_modelo(self.modelo.get())))
 
-        # Tope
-        ttk.Label(cuerpo, text=t("opt_cap"), style="Seccion.TLabel").grid(row=6, column=0, sticky="w", pady=(16, 0))
-        self.tope = tk.StringVar(value=f"{c.tope_gasto_usd:f}".rstrip("0").rstrip(".") or "0")
-        ttk.Entry(cuerpo, textvariable=self.tope, width=12).grid(row=7, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(cuerpo, text=t("opt_cap_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
+        # Instrucciones comunes
+        ttk.Label(cuerpo, text=t("opt_instructions"), style="Seccion.TLabel").grid(row=6, column=0, sticky="w", pady=(16, 0))
+        caja_i = tarjeta(cuerpo, p)
+        caja_i.grid(row=7, column=0, sticky="ew", pady=(4, 0))
+        caja_i.columnconfigure(0, weight=1)
+        self.instrucciones = tk.Text(caja_i, height=3, wrap="word", relief="flat", font=f.texto, padx=10, pady=8,
+                                     background=p.superficie, foreground=p.texto, insertbackground=p.texto,
+                                     borderwidth=0, highlightthickness=0, undo=True)
+        self.instrucciones.grid(row=0, column=0, sticky="ew")
+        self.instrucciones.insert("1.0", c.system_prompt)
+        ttk.Label(cuerpo, text=t("opt_instructions_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
             row=8, column=0, sticky="w", pady=(4, 0))
+
+        # Tope
+        ttk.Label(cuerpo, text=t("opt_cap"), style="Seccion.TLabel").grid(row=9, column=0, sticky="w", pady=(16, 0))
+        self.tope = tk.StringVar(value=f"{c.tope_gasto_usd:f}".rstrip("0").rstrip(".") or "0")
+        ttk.Entry(cuerpo, textvariable=self.tope, width=12).grid(row=10, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(cuerpo, text=t("opt_cap_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
+            row=11, column=0, sticky="w", pady=(4, 0))
 
         # Resto
         self.auto = tk.BooleanVar(value=c.auto_arranque)
-        ttk.Checkbutton(cuerpo, text=t("opt_autostart"), variable=self.auto).grid(row=9, column=0, sticky="w", pady=(14, 0))
+        ttk.Checkbutton(cuerpo, text=t("opt_autostart"), variable=self.auto).grid(row=12, column=0, sticky="w", pady=(14, 0))
         fila_i = ttk.Frame(cuerpo)
-        fila_i.grid(row=10, column=0, sticky="w", pady=(10, 0))
+        fila_i.grid(row=13, column=0, sticky="w", pady=(10, 0))
         ttk.Label(fila_i, text=t("opt_language")).pack(side="left")
         self._idiomas = {"Auto": "", "Español": "es", "English": "en"}
         actual = next((k for k, v in self._idiomas.items() if v == c.idioma), "Auto")
         self.idioma = tk.StringVar(value=actual)
         ttk.Combobox(fila_i, textvariable=self.idioma, values=list(self._idiomas), state="readonly", width=10).pack(
             side="left", padx=(8, 0))
+        ttk.Label(fila_i, text=t("opt_theme")).pack(side="left", padx=(18, 0))
+        self._temas = {t("theme_auto"): "auto", t("theme_light"): "claro", t("theme_dark"): "oscuro"}
+        self.tema = tk.StringVar(value=next((k for k, v in self._temas.items() if v == c.tema), t("theme_auto")))
+        ttk.Combobox(fila_i, textvariable=self.tema, values=list(self._temas), state="readonly", width=10).pack(
+            side="left", padx=(8, 0))
 
         self.aviso = tk.Label(cuerpo, text="", anchor="w", justify="left", wraplength=500,
                               background=p.fondo, foreground=p.error, font=f.base)
-        self.aviso.grid(row=11, column=0, sticky="w", pady=(8, 0))
+        self.aviso.grid(row=14, column=0, sticky="w", pady=(8, 0))
 
         # Enlaces y botones
         enlaces = ttk.Frame(cuerpo)
-        enlaces.grid(row=12, column=0, sticky="ew", pady=(14, 0))
+        enlaces.grid(row=15, column=0, sticky="ew", pady=(14, 0))
         ttk.Button(enlaces, text=t("opt_advanced"), style="Enlace.TButton", command=self._avanzado).pack(side="left")
         ttk.Button(enlaces, text=t("opt_folder"), style="Enlace.TButton",
                    command=lambda: abrir_ruta(paths.RESPONSES_DIR)).pack(side="left")
         ttk.Label(enlaces, text=t("opt_about", v=paths.APP_VERSION), style="Pequeno.TLabel").pack(side="right")
 
         botones = ttk.Frame(cuerpo)
-        botones.grid(row=13, column=0, sticky="e", pady=(16, 0))
+        botones.grid(row=16, column=0, sticky="e", pady=(16, 0))
         ttk.Button(botones, text=t("opt_cancel"), command=self.destroy).pack(side="left")
         ttk.Button(botones, text=t("opt_save"), style="Primary.TButton", command=self.guardar).pack(side="left", padx=(8, 0))
         self.mostrar()
@@ -288,6 +306,8 @@ class DialogoOpciones(Modal):
         self.app.aplicar_opciones(
             modelo=self.modelo.get().strip(), tope=tope, auto=self.auto.get(),
             idioma=self._idiomas.get(self.idioma.get(), ""),
+            instrucciones=self.instrucciones.get("1.0", "end-1c").strip(),
+            tema=self._temas.get(self.tema.get(), "auto"),
         )
         self.destroy()
 
@@ -341,11 +361,12 @@ class SimpleApp:
 
         root.title(t("app_title"))
         poner_icono(root)
+        avisar_de_errores_inesperados(root)
         root.geometry("1020x660")
         root.minsize(820, 560)
-        self.p, self.f = aplicar_estilo(root)
+        self.p, self.f = aplicar_estilo(root, self.config.tema)
         self.bridge = UiBridge(root)
-        self.cola = Cola(self.config, _Eventos(self), publicar=self.bridge.publicar, fabrica=fabrica)
+        self.cola = Cola(self.config, _EventosDeLaCola(self), publicar=self.bridge.publicar, fabrica=fabrica)
 
         self._filas: dict[int, str] = {}
         self._parcial: dict[int, str] = {}
@@ -355,7 +376,7 @@ class SimpleApp:
         self._ultimo_restante: Optional[float] = None
         self._dibujando_estado = EstadoCola()
         self.bandeja: Optional[tray.BandejaDelSistema] = None
-        self._usar_bandeja = usar_bandeja and tray.disponible()
+        self._usar_bandeja = usar_bandeja and tray.bandeja_disponible()
         self._temporizadores: set[str] = set()
 
         root.columnconfigure(0, weight=1)
@@ -445,11 +466,8 @@ class SimpleApp:
         self.boton_pausa = ttk.Button(botones, text=t("pause"), command=self.alternar_pausa)
         self.boton_pausa.pack(fill="x", pady=(8, 0))
 
-        pistas = ttk.Frame(f)
-        pistas.grid(row=3, column=0, sticky="sew", pady=(0, 0))
         ttk.Label(f, text=t("hint_keys") + "   ·   " + t("hint_saved"), style="Pequeno.TLabel").grid(
             row=5, column=0, sticky="w", pady=(6, 0))
-        pistas.destroy()
 
         # Cola y respuesta: ocupan el resto de la ventana
         cuerpo = ttk.PanedWindow(f, orient="horizontal")
@@ -475,10 +493,12 @@ class SimpleApp:
         self.tabla.column("q", width=200, minwidth=90, anchor="w")
         self.tabla.column("s", width=112, minwidth=100, anchor="w", stretch=False)
         self.tabla.grid(row=0, column=0, sticky="nsew")
+        self.vacio = tk.Label(tabla, text=t("queue_empty"), background=p.superficie, foreground=p.apagado,
+                              font=fu.base, justify="center", wraplength=260)
         sb2 = ttk.Scrollbar(tabla, orient="vertical", command=self.tabla.yview)
         sb2.grid(row=0, column=1, sticky="ns")
         self.tabla.configure(yscrollcommand=sb2.set)
-        for tag, color in (("lista", p.ok), ("error", p.error), ("enviando", p.acento), ("espera", p.aviso),
+        for tag, color in (("lista", p.ok), ("error", p.error), ("enviando", p.acento_texto), ("espera", p.aviso),
                            ("cola", p.gris), ("rechazada", p.aviso), ("quitada", p.gris)):
             self.tabla.tag_configure(tag, foreground=color)
         self.tabla.bind("<<TreeviewSelect>>", self._al_seleccionar)
@@ -512,6 +532,10 @@ class SimpleApp:
         acciones.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ttk.Button(acciones, text=t("copy"), command=self.copiar_respuesta).pack(side="left")
         ttk.Button(acciones, text=t("save_all"), command=self.guardar_todo).pack(side="left", padx=(8, 0))
+        self.var_formato = tk.BooleanVar(value=self.config.mostrar_formato)
+        self.check_formato = ttk.Checkbutton(acciones, text=t("format"), variable=self.var_formato,
+                                             command=self._cambiar_formato)
+        self.check_formato.pack(side="right")
 
         # Barra de estado
         barra = ttk.Frame(f)
@@ -524,6 +548,7 @@ class SimpleApp:
         self.var_gasto = tk.StringVar()
         ttk.Label(barra, textvariable=self.var_gasto, style="Sub.TLabel").grid(row=0, column=2, sticky="e")
         self.menu = tk.Menu(self.root, tearoff=0)
+        self._actualizar_vacio()
         # El reparto inicial lo decide el contenido; se fija a mano para que la cola se lea entera.
         self._luego(60, self._ajustar_reparto)
 
@@ -656,6 +681,7 @@ class SimpleApp:
         if iid is None:
             iid = self.tabla.insert("", "end", values=valores, tags=(etiqueta,))
             self._filas[msg.id] = iid
+            self._actualizar_vacio()
             self.tabla.see(iid)
         else:
             self.tabla.item(iid, values=valores, tags=(etiqueta,))
@@ -708,7 +734,7 @@ class SimpleApp:
         n = self.cola.pendientes()
         color = self.p.ok
         if e.tipo == "sending":
-            texto, color = t("status_sending", n=e.msg_id or "?"), self.p.acento
+            texto, color = t("status_sending", n=e.msg_id or "?"), self.p.acento_texto
         elif e.tipo == "waiting":
             restante = self._ultimo_restante if self._ultimo_restante is not None else e.segundos
             texto = t(f"status_wait_{e.motivo}", t=formatear_tiempo(restante)) if e.motivo else t("status_stopped")
@@ -757,13 +783,25 @@ class SimpleApp:
         sel = self._seleccionada()
         self._seleccion_auto = sel is None or sel == max(self._filas, default=sel)
 
-    def _escribir_respuesta(self, texto: str, apagado: bool = False) -> None:
+    def _escribir_respuesta(self, texto: str, apagado: bool = False, con_formato: bool = False) -> None:
+        """`con_formato` es para la respuesta ya terminada; mientras llega (streaming) se ve el texto tal cual."""
+        if con_formato:
+            formato.mostrar_texto_con_formato(self.respuesta, texto, self.p, self.f, self.config.mostrar_formato)
+            self.respuesta.yview_moveto(0.0)  # una respuesta terminada se lee desde el principio
+            return
         self.respuesta.configure(state="normal")
         self.respuesta.delete("1.0", "end")
         self.respuesta.insert("1.0", texto, ("apagado",) if apagado else ())
         self.respuesta.configure(state="disabled")
         if not apagado:
             self.respuesta.see("end")
+
+    def _cambiar_formato(self) -> None:
+        self.config.mostrar_formato = bool(self.var_formato.get())
+        ConfigManager.guardar(self.config)
+        sel = self._seleccionada()
+        if sel is not None:
+            self._mostrar_respuesta(sel)
 
     def texto_de_respuesta(self, msg_id: int) -> str:
         job = self.cola.job
@@ -780,7 +818,8 @@ class SimpleApp:
         msg = self.cola.job.mensaje(msg_id) if self.cola.job else None
         texto = self.texto_de_respuesta(msg_id)
         if texto:
-            self._escribir_respuesta(texto)
+            terminada = msg is not None and msg.status in (STATUS_COMPLETED, STATUS_REFUSED)
+            self._escribir_respuesta(texto, con_formato=terminada)
         elif msg is not None and msg.status == STATUS_PENDING:
             self._escribir_respuesta(t("answer_waiting"), apagado=True)
         else:
@@ -795,7 +834,7 @@ class SimpleApp:
         p = self.p
         fondo, borde, color = {
             "error": (p.banner_error_fondo, p.banner_error_borde, p.error),
-            "info": (p.banner_info_fondo, p.banner_info_borde, p.acento_hover),
+            "info": (p.banner_info_fondo, p.banner_info_borde, p.acento_texto),
         }.get(tono, (p.banner_aviso_fondo, p.banner_aviso_borde, p.aviso))
         self.banner.configure(background=fondo, highlightbackground=borde)
         self.banner_botones.configure(background=fondo)
@@ -891,6 +930,15 @@ class SimpleApp:
         self._decir_en_barra(t("save_done", ruta=destino), 4000)
         return True
 
+    def _actualizar_vacio(self) -> None:
+        """El mensaje de «aquí irán tus preguntas» solo se ve mientras la cola está vacía."""
+        if self._filas:
+            self.vacio.place_forget()
+        else:
+            self.vacio.place(relx=0.5, rely=0.42, anchor="center")
+            self.vacio.lift()
+            self._escribir_respuesta(t("answer_placeholder"), apagado=True)
+
     def nueva_cola(self) -> None:
         if self.cola.activa and not self.cola.pausada:
             self._info(t("new_queue"), t("new_blocked"))
@@ -906,6 +954,7 @@ class SimpleApp:
             self._banner_fijo = False
             self._seleccion_auto = True
             self._refrescar_gasto()
+            self._actualizar_vacio()
 
     def volver_a_preguntar(self, msg_id: int) -> None:
         msg = self.cola.job.mensaje(msg_id) if self.cola.job else None
@@ -943,12 +992,17 @@ class SimpleApp:
     def abrir_opciones(self) -> None:
         DialogoOpciones(self)
 
-    def aplicar_opciones(self, modelo: str, tope: Decimal, auto: bool, idioma: str) -> None:
+    def aplicar_opciones(self, modelo: str, tope: Decimal, auto: bool, idioma: str,
+                         instrucciones: Optional[str] = None, tema: Optional[str] = None) -> None:
         sube_el_tope = tope > self.config.tope_gasto_usd or tope == 0
         self.config.modelo = modelo or self.config.modelo
+        if instrucciones is not None:
+            self.config.system_prompt = instrucciones
         self.config.tope_gasto_usd = tope
         self.config.auto_arranque = auto
         self.config.idioma = idioma
+        if tema in TEMAS:
+            self.config.tema = tema
         ConfigManager.guardar(self.config)
         self.cola.actualizar_config(self.config)
         self._refrescar_gasto()

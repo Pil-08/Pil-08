@@ -24,13 +24,17 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable, Optional
 
-import anthropic
+try:
+    import anthropic
+except ImportError:  # el arranque lo explica y ofrece instalarla (ver instalacion.py)
+    anthropic = None  # type: ignore[assignment]
 
 from ..config import Configuracion
 from ..export import MARCA_RESPUESTA, MARCA_SOLICITUD
 from ..job import STATUS_COMPLETED, STATUS_FAILED, STATUS_REFUSED, Job, JobMessage
 from ..notify import notificar
 from ..paths import logger, write_atomic
+from ..platform_utils import comando_para_instalar
 from ..pricing import (
     ESCRITURA_CACHE_5M,
     Consumo,
@@ -183,6 +187,8 @@ class EngineBase:
     # ------------------------------------------------------------------
 
     def inicializar_cliente(self) -> None:
+        if anthropic is None:
+            raise ValueError(f"Falta la librería 'anthropic'. Instálala con: {comando_para_instalar('anthropic')}")
         api_key = obtener_api_key()
         if not api_key:
             raise ValueError(

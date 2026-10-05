@@ -31,7 +31,7 @@ from .inputs import ErrorDeEntrada, aplicar_plantilla, leer_ordenes
 from .job import Job, JobMessage, listar_jobs, purgar_jobs_antiguos
 from .parsing import DEFAULT_SEPARATOR, split_messages
 from .paths import logger
-from .platform_utils import KeepAwake
+from .platform_utils import KeepAwake, comando_para_ejecutar
 from .pricing import DEFAULT_MODEL, NIVELES_ESFUERZO, formatear_usd
 
 EXIT_OK, EXIT_FALLO, EXIT_TOPE, EXIT_SIN_SALDO, EXIT_INCOMPLETO, EXIT_USO = 0, 1, 2, 3, 4, 5
@@ -80,7 +80,7 @@ class _Parser(argparse.ArgumentParser):
 
 def construir_parser() -> argparse.ArgumentParser:
     p = _Parser(
-        prog="claude-batch-monitor --cli",
+        prog=f"{comando_para_ejecutar()} --cli",
         description="Procesa una lista de órdenes con Claude, con tope de gasto y reanudación.",
         epilog="Códigos de salida: 0 ok · 1 fallo · 2 tope de gasto · 3 sin saldo/límite de cuenta · "
         "4 incompleto · 5 uso incorrecto",
@@ -160,7 +160,7 @@ def _texto_o_fichero(valor: Optional[str]) -> str:
     return valor
 
 
-def _decimal(valor: Optional[str], nombre: str) -> Optional[Decimal]:
+def _decimal_de_opcion(valor: Optional[str], nombre: str) -> Optional[Decimal]:
     if valor is None:
         return None
     try:
@@ -202,9 +202,9 @@ def _configuracion(args: argparse.Namespace, job: Optional[Job]) -> Configuracio
     if args.max_tokens is not None:
         c.max_tokens = args.max_tokens
     c.concurrencia = max(1, args.concurrencia)
-    c.tope_gasto_usd = _decimal(args.tope_gasto, "--tope-gasto") or Decimal(0)
-    c.precio_input_mtok = _decimal(args.precio_in, "--precio-in")
-    c.precio_output_mtok = _decimal(args.precio_out, "--precio-out")
+    c.tope_gasto_usd = _decimal_de_opcion(args.tope_gasto, "--tope-gasto") or Decimal(0)
+    c.precio_input_mtok = _decimal_de_opcion(args.precio_in, "--precio-in")
+    c.precio_output_mtok = _decimal_de_opcion(args.precio_out, "--precio-out")
     c.modo_continuo = args.bucle
     c.hora_limite = args.hora_limite or ""
     c.pausa_ciclos_sec = max(1, args.pausa_ciclos)
@@ -212,7 +212,7 @@ def _configuracion(args: argparse.Namespace, job: Optional[Job]) -> Configuracio
     return c
 
 
-def _resumen(razon: StopReason, job: Job, engine: Optional[EngineBase], exportado: Optional[Path]) -> dict:
+def _resumen_del_lote(razon: StopReason, job: Job, engine: Optional[EngineBase], exportado: Optional[Path]) -> dict:
     e = job.estadisticas()
     return {
         "job_id": job.job_id,
@@ -397,7 +397,7 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
         except (ErrorDeExportacion, OSError) as e:
             salida.error(f"No se pudo exportar: {e}")
 
-    resumen = _resumen(razon, job, motor, exportado)
+    resumen = _resumen_del_lote(razon, job, motor, exportado)
     if args.json:
         print(json.dumps(resumen, ensure_ascii=False))
     else:

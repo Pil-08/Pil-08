@@ -1,7 +1,9 @@
 """Anti-suspensión y abrir carpetas, sin tocar el sistema de verdad (todo se sustituye por falsos)."""
 
 import os
+import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -149,3 +151,105 @@ class TestAbrirRuta:
 
         monkeypatch.setattr(pu.subprocess, "Popen", roto)
         assert abrir_ruta(Path("/tmp/x")) is False
+
+
+class TestComandosParaMostrar:
+    """Lo que se le enseña a la persona para copiar en una terminal debe funcionar en su sistema."""
+
+    def test_python_se_llama_py_en_windows_y_python3_en_el_resto(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert pu.nombre_de_python() == "py"
+        for sistema in ("linux", "darwin"):
+            monkeypatch.setattr(sys, "platform", sistema)
+            assert pu.nombre_de_python() == "python3"
+
+    def test_instalar_una_libreria(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert pu.comando_para_instalar("anthropic") == "python3 -m pip install anthropic"
+
+    def test_ejecutar_el_paquete(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(pu, "__package__", "claude_batch_monitor")
+        assert pu.comando_para_ejecutar() == "python3 -m claude_batch_monitor"
+
+    def test_ejecutar_el_archivo_unico_usa_su_nombre(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(pu, "__package__", "")
+        monkeypatch.setattr(pu, "__file__", "C:/Users/ana/Descargas/claude_batch_monitor.py")
+        assert pu.comando_para_ejecutar() == "py claude_batch_monitor.py"
+
+    def test_ejecutar_el_ejecutable_descargado(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", "/opt/cbm/claude-batch-monitor")
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert pu.comando_para_ejecutar() == "./claude-batch-monitor"
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "executable", "C:/cbm/claude-batch-monitor.exe")
+        assert pu.comando_para_ejecutar() == "claude-batch-monitor.exe"
+
+
+def _salida(texto: str, codigo: int = 0):
+    return types.SimpleNamespace(stdout=texto, stderr="", returncode=codigo)
+
+
+class TestTemaDelSistema:
+    def test_windows_claro_y_oscuro(self, monkeypatch):
+        valores = {}
+
+        class Clave:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        falso = types.SimpleNamespace(
+            HKEY_CURRENT_USER="HKCU",
+            OpenKey=lambda raiz, ruta: (valores.update(ruta=ruta, raiz=raiz), Clave())[1],
+            QueryValueEx=lambda clave, nombre: (valores["usa_claro"], 1),
+        )
+        monkeypatch.setitem(sys.modules, "winreg", falso)
+        monkeypatch.setattr(sys, "platform", "win32")
+        valores["usa_claro"] = 0
+        assert pu.tema_del_sistema() == "oscuro"
+        assert valores["ruta"].endswith(r"Themes\Personalize") and valores["raiz"] == "HKCU"
+        valores["usa_claro"] = 1
+        assert pu.tema_del_sistema() == "claro"
+
+    def test_macos_oscuro_si_el_sistema_lo_dice_y_claro_si_el_ajuste_no_existe(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(pu.subprocess, "run", lambda *a, **k: _salida("Dark\n"))
+        assert pu.tema_del_sistema() == "oscuro"
+        # en modo claro, `defaults` falla con «The domain/default pair ... does not exist»
+        monkeypatch.setattr(pu.subprocess, "run", lambda *a, **k: _salida("", 1))
+        assert pu.tema_del_sistema() == "claro"
+
+    def test_linux_gnome(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(pu.shutil, "which", lambda nombre: "/usr/bin/gsettings")
+        monkeypatch.delenv("GTK_THEME", raising=False)
+        pedidos = []
+        monkeypatch.setattr(pu.subprocess, "run", lambda orden, **k: pedidos.append(orden) or _salida("'prefer-dark'\n"))
+        assert pu.tema_del_sistema() == "oscuro"
+        assert pedidos == [["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"]]
+        monkeypatch.setattr(pu.subprocess, "run", lambda *a, **k: _salida("'default'\n"))
+        assert pu.tema_del_sistema() == "claro"
+
+    def test_linux_sin_gsettings_mira_gtk_theme(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(pu.shutil, "which", lambda nombre: None)
+        monkeypatch.setenv("GTK_THEME", "Adwaita:dark")
+        assert pu.tema_del_sistema() == "oscuro"
+        monkeypatch.setenv("GTK_THEME", "Adwaita")
+        assert pu.tema_del_sistema() == "claro"
+        monkeypatch.delenv("GTK_THEME")
+        assert pu.tema_del_sistema() == "claro"
+
+    @pytest.mark.parametrize("sistema", ["win32", "darwin", "linux"])
+    def test_si_algo_falla_se_queda_en_claro(self, monkeypatch, sistema):
+        def roto(*a, **k):
+            raise subprocess.TimeoutExpired("x", 3)
+
+        monkeypatch.setattr(sys, "platform", sistema)
+        monkeypatch.setattr(pu.subprocess, "run", roto)
+        monkeypatch.setattr(pu.shutil, "which", lambda nombre: "/usr/bin/gsettings")
+        monkeypatch.setitem(sys.modules, "winreg", None)  # `import winreg` falla
+        monkeypatch.delenv("GTK_THEME", raising=False)
+        assert pu.tema_del_sistema() == "claro"

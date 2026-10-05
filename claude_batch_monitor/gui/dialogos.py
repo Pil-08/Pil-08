@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 
 from ..estimator import Estimacion
 from ..pricing import formatear_usd
+from . import formato
 from .comun import Modal
 
 
@@ -30,7 +31,7 @@ def _texto_solo_lectura(master: tk.Misc, app: Any, alto: int, mono: bool = False
     return marco, texto
 
 
-def _poner(texto: tk.Text, contenido: str) -> None:
+def _escribir_en(texto: tk.Text, contenido: str) -> None:
     texto.configure(state="normal")
     texto.delete("1.0", "end")
     texto.insert("1.0", contenido)
@@ -91,10 +92,14 @@ class VisorRespuesta(Modal):
         ttk.Label(cuerpo, text="Respuesta", style="Seccion.TLabel").grid(row=3, column=0, sticky="w", pady=(12, 4))
         marco_b, self.texto_respuesta = _texto_solo_lectura(cuerpo, app, 10)
         marco_b.grid(row=4, column=0, sticky="nsew")
-        _poner(self.texto_orden, solicitud)
-        _poner(self.texto_respuesta, respuesta or "(sin respuesta guardada)")
+        _escribir_en(self.texto_orden, solicitud)
+        self.var_formato = tk.BooleanVar(value=bool(getattr(app.config, "mostrar_formato", True)))
+        self._pintar_respuesta()
         botones = ttk.Frame(cuerpo)
         botones.grid(row=5, column=0, sticky="e", pady=(14, 0))
+        self.check_formato = ttk.Checkbutton(botones, text="Con formato", variable=self.var_formato,
+                                             command=self._pintar_respuesta)
+        self.check_formato.pack(side="left", padx=(0, 14))
         self.boton_copiar = ttk.Button(botones, text="Copiar respuesta", command=lambda: al_copiar(self.respuesta))
         self.boton_copiar.pack(side="left")
         if not respuesta:
@@ -102,6 +107,12 @@ class VisorRespuesta(Modal):
         ttk.Button(botones, text="Cerrar", style="Primary.TButton", command=self.destroy).pack(
             side="left", padx=(8, 0))
         self.mostrar()
+
+    def _pintar_respuesta(self) -> None:
+        if self.respuesta:
+            formato.mostrar_texto_con_formato(self.texto_respuesta, self.respuesta, self.app.p, self.app.f, bool(self.var_formato.get()))
+        else:
+            _escribir_en(self.texto_respuesta, "(sin respuesta guardada)")
 
 
 class DialogoEstimacion(Modal):
@@ -118,7 +129,7 @@ class DialogoEstimacion(Modal):
         marco, texto = _texto_solo_lectura(cuerpo, app, len(lineas) + 1, mono=True)
         marco.grid(row=0, column=0, sticky="ew")
         texto.configure(width=88)
-        _poner(texto, "\n".join(lineas))
+        _escribir_en(texto, "\n".join(lineas))
         fila = 1
         explicacion = (
             "El coste máximo supone que cada respuesta llena max_tokens. Lo normal es gastar bastante "

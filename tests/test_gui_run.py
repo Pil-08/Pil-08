@@ -42,55 +42,55 @@ class TestModoPedido:
 
 class TestRun:
     def test_la_primera_vez_se_abre_el_modo_simple(self, ventanas):
-        assert gui.run([]) == 0
+        assert gui.abrir_interfaz([]) == 0
         assert ventanas["llamadas"] == ["simple"]
 
     def test_se_abre_el_modo_de_la_ultima_vez(self, ventanas):
         ConfigManager.guardar(Configuracion(interfaz="avanzada"))
-        gui.run([])
+        gui.abrir_interfaz([])
         assert ventanas["llamadas"] == ["avanzada"]
 
     def test_la_opcion_de_la_linea_de_ordenes_manda_sobre_lo_guardado(self, ventanas):
         ConfigManager.guardar(Configuracion(interfaz="avanzada"))
-        gui.run(["--simple"])
+        gui.abrir_interfaz(["--simple"])
         assert ventanas["llamadas"] == ["simple"]
         ventanas["llamadas"].clear()
         ConfigManager.guardar(Configuracion(interfaz="simple"))
-        gui.run(["--avanzado"])
+        gui.abrir_interfaz(["--avanzado"])
         assert ventanas["llamadas"] == ["avanzada"]
 
     def test_pedir_otro_modo_desde_la_ventana_lo_abre(self, ventanas):
         ventanas["simple"].append("avanzada")      # en el simple se pulsó «Modo avanzado»
         ventanas["avanzada"].append("simple")      # y luego, en el avanzado, «Modo simple»
-        assert gui.run([]) == 0
+        assert gui.abrir_interfaz([]) == 0
         assert ventanas["llamadas"] == ["simple", "avanzada", "simple"]
 
     def test_cerrar_la_ventana_termina_sin_volver_a_abrir(self, ventanas):
         ventanas["simple"].append(None)
-        gui.run([])
+        gui.abrir_interfaz([])
         assert ventanas["llamadas"] == ["simple"]
 
     def test_pedir_el_mismo_modo_no_entra_en_un_bucle(self, ventanas):
         ventanas["simple"].append("simple")
-        assert gui.run([]) == 0 and ventanas["llamadas"] == ["simple"]
+        assert gui.abrir_interfaz([]) == 0 and ventanas["llamadas"] == ["simple"]
 
     def test_un_valor_desconocido_tampoco(self, ventanas):
         ventanas["simple"].append("otra-cosa")
-        assert gui.run([]) == 0 and ventanas["llamadas"] == ["simple"]
+        assert gui.abrir_interfaz([]) == 0 and ventanas["llamadas"] == ["simple"]
 
     def test_sin_pantalla_se_dice_y_se_sale_con_error(self, ventanas, monkeypatch, capsys):
         def sin_pantalla(config=None):
             raise tk.TclError("no display name and no $DISPLAY environment variable")
 
         monkeypatch.setattr(modulo_simple, "ejecutar_simple", sin_pantalla)
-        assert gui.run([]) == 1
+        assert gui.abrir_interfaz([]) == 1
         err = capsys.readouterr().err
         assert "No se pudo abrir la ventana" in err and "--cli" in err
 
     def test_un_config_json_corrupto_abre_el_modo_simple(self, ventanas):
         from claude_batch_monitor import paths
         paths.CONFIG_FILE.write_text("{no es json", encoding="utf-8")
-        gui.run([])
+        gui.abrir_interfaz([])
         assert ventanas["llamadas"] == ["simple"]
 
 

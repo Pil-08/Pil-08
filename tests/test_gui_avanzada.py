@@ -122,6 +122,19 @@ class TestAjustes:
         assert c.precio_input_mtok is None            # vacío = el del catálogo
         assert c.system_prompt == "Eres un traductor."
 
+    def test_el_tema_se_elige_con_nombres_legibles_y_se_guarda(self, raiz):
+        from claude_batch_monitor.gui.estilo import PALETA_OSCURA
+
+        app = crear(raiz, config=cfg(tema="oscuro"))
+        assert app.p is PALETA_OSCURA and app.v["tema"].get() == "Oscuro"
+        assert list(app.combo_tema.cget("values")) == ["Automático", "Claro", "Oscuro"]
+        app.v["tema"].set("Claro")
+        assert app.leer_ajustes().tema == "claro"
+        app.v["tema"].set("Automático")
+        assert app.leer_ajustes().tema == "auto"
+        app.v["tema"].set("algo raro")                      # un valor que no existe no cambia la elección anterior
+        assert app.leer_ajustes().tema == "oscuro"
+
     def test_sin_esfuerzo_no_se_envia(self, raiz):
         app = crear(raiz, config=cfg(esfuerzo="high"))
         app.v["esfuerzo"].set(modulo.SIN_ESFUERZO)
@@ -642,6 +655,19 @@ class TestResultados:
         assert v.texto_orden.get("1.0", "end-1c") == "pregunta" and v.texto_respuesta.get("1.0", "end-1c") == "respuesta"
         v.boton_copiar.invoke()
         assert copiado == ["respuesta"]
+        v.destroy()
+
+    def test_el_visor_muestra_la_respuesta_con_formato_y_se_puede_ver_sin_el(self, raiz, con_clave):
+        from claude_batch_monitor.gui.dialogos import VisorRespuesta
+        app = crear(raiz)
+        copiado = []
+        v = VisorRespuesta(app, "Orden 1", "Lista", "pregunta", "# Título\n\nCon **fuerza**.", copiado.append)
+        assert "**" not in v.texto_respuesta.get("1.0", "end") and v.texto_respuesta.tag_ranges("negrita")
+        v.var_formato.set(False)
+        v._pintar_respuesta()
+        assert "**fuerza**" in v.texto_respuesta.get("1.0", "end") and not v.texto_respuesta.tag_ranges("negrita")
+        v.boton_copiar.invoke()
+        assert copiado == ["# Título\n\nCon **fuerza**."]               # copiar siempre da el original
         v.destroy()
 
     def test_el_visor_sin_respuesta_no_deja_copiar(self, raiz, con_clave):

@@ -114,6 +114,7 @@ class FakeMessages:
     def __init__(self, guion, headers=None):
         self.guion = list(guion)
         self.llamadas = 0
+        self.peticiones = []  # los parámetros de cada petición, para poder comprobar qué se envió
         self.headers = headers or {}
         self.with_raw_response = FakeRawWrapper(self)
 
@@ -129,9 +130,11 @@ class FakeMessages:
         return siguiente
 
     def create(self, **kwargs):
+        self.peticiones.append(kwargs)
         return self._siguiente()
 
     def stream(self, **kwargs):
+        self.peticiones.append(kwargs)
         return FakeStream(self._siguiente(), self.headers)
 
     def count_tokens(self, **kwargs):

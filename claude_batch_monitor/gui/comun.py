@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import sys
+import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Any
 
+from .. import paths
+from ..paths import logger
 from .estilo import Paleta
-from .icono import RUTA_PNG
+from .i18n import t
+from .icono import png_del_icono
 
 URL_CONSOLA = "https://platform.claude.com"
 URL_FACTURACION = "https://platform.claude.com/settings/billing"
@@ -102,9 +107,31 @@ class Desplazable(ttk.Frame):
 def poner_icono(root: tk.Misc) -> bool:
     """Pone el icono de la aplicación en la ventana (y en la barra de tareas). Nunca impide abrirla."""
     try:
-        imagen = tk.PhotoImage(master=root, file=str(RUTA_PNG))
+        imagen = tk.PhotoImage(master=root, data=base64.b64encode(png_del_icono(64)))
         root.iconphoto(True, imagen)  # type: ignore[attr-defined]
         root._icono_app = imagen  # type: ignore[attr-defined]  # tkinter suelta la imagen si nadie la sujeta
         return True
     except Exception:
         return False
+
+
+def avisar_de_errores_inesperados(root: tk.Misc, segundos_sin_repetir: float = 30.0) -> None:
+    """Tk cuenta los errores de los botones solo en la consola, que quien abre el programa con doble clic no ve.
+
+    Aquí se guardan en el registro y se avisa con una ventana (sin repetir el mismo aviso en bucle).
+    """
+    ultimo = {"firma": "", "hora": -1e9}
+
+    def al_fallar(tipo: Any, valor: Any, traza: Any) -> None:
+        logger.error("Error inesperado en la ventana", exc_info=(tipo, valor, traza))
+        firma = f"{getattr(tipo, '__name__', tipo)}: {valor}"
+        ahora = time.monotonic()
+        if firma == ultimo["firma"] and ahora - ultimo["hora"] < segundos_sin_repetir:
+            return
+        ultimo["firma"], ultimo["hora"] = firma, ahora
+        try:
+            messagebox.showerror(t("unexpected_title"), t("unexpected_text", error=firma, log=paths.LOG_FILE), parent=root)
+        except Exception:
+            pass  # un fallo al avisar no puede causar otro
+
+    root.report_callback_exception = al_fallar  # type: ignore[method-assign]

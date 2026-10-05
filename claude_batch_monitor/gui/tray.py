@@ -13,7 +13,7 @@ from typing import Callable, Optional
 from ..paths import APP_NAME, logger
 
 
-def disponible() -> bool:
+def bandeja_disponible() -> bool:
     try:
         import PIL.Image  # noqa: F401
         import pystray  # noqa: F401
@@ -23,10 +23,10 @@ def disponible() -> bool:
         return False
 
 
-def _imagen():
-    from .icono import dibujar
+def _imagen_de_bandeja():
+    from .icono import imagen_pil
 
-    return dibujar(64)
+    return imagen_pil(64)
 
 
 class BandejaDelSistema:
@@ -55,7 +55,7 @@ class BandejaDelSistema:
                 pystray.MenuItem(self.texto_abrir, lambda *_: self.al_abrir(), default=True),
                 pystray.MenuItem(self.texto_salir, lambda *_: self.al_salir()),
             )
-            icono = pystray.Icon(APP_NAME, _imagen(), self.titulo, menu)
+            icono = pystray.Icon(APP_NAME, _imagen_de_bandeja(), self.titulo, menu)
             self._icono = icono
             threading.Thread(target=self._ejecutar, args=(icono,), daemon=True).start()
             return True

@@ -19,10 +19,12 @@ from .gui_comun import bombear  # noqa: E402
 class TestIcono:
     def test_se_pone_el_icono_y_la_ventana_lo_conserva(self, raiz):
         assert comun.poner_icono(raiz) is True
-        assert raiz._icono_app.width() == 256          # sujeto: si no, tkinter lo suelta y la ventana queda sin icono
+        assert raiz._icono_app.width() == 64           # sujeto: si no, tkinter lo suelta y la ventana queda sin icono
 
-    def test_si_falta_el_archivo_no_pasa_nada(self, raiz, monkeypatch, tmp_path):
-        monkeypatch.setattr(comun, "RUTA_PNG", tmp_path / "no-existe.png")
+    def test_si_algo_falla_no_impide_abrir_la_ventana(self, raiz, monkeypatch):
+        def roto(tamano):
+            raise RuntimeError("sin imagen")
+        monkeypatch.setattr(comun, "png_del_icono", roto)
         assert comun.poner_icono(raiz) is False
 
 

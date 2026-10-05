@@ -1,8 +1,10 @@
 import json
 from decimal import Decimal as D
 
+import pytest
+
 from claude_batch_monitor import paths
-from claude_batch_monitor.config import ConfigManager, Configuracion, a_decimal
+from claude_batch_monitor.config import TEMAS, ConfigManager, Configuracion, a_decimal
 
 
 class TestDecimal:
@@ -131,7 +133,6 @@ class TestPersistencia:
             "pausa_ciclos_sec": 10,
             "pausa_entre_mensajes_sec": 3,
             "auto_arranque": False,
-            "modo_fantasma": False,
             "timeout_api_sec": 120,
             "max_error_attempts": 8,
             "tope_gasto_usd": 5.0,
@@ -146,6 +147,11 @@ class TestPersistencia:
         assert c.modo == "inmediato" and c.system_prompt == ""
         assert c.hora_limite == "23:59"
         assert c.telegram_chat_id == "123"
+
+    def test_el_formato_de_las_respuestas_esta_activado_salvo_que_se_diga_otra_cosa(self):
+        assert Configuracion().mostrar_formato is True
+        assert Configuracion.desde_dict({}).mostrar_formato is True
+        assert Configuracion.desde_dict({"mostrar_formato": False}).mostrar_formato is False
 
     def test_los_valores_fuera_de_rango_se_recortan(self):
         paths.CONFIG_FILE.write_text(
@@ -174,3 +180,22 @@ class TestPersistencia:
         assert c.interfaz == "simple"
         assert c.esfuerzo == ""
         assert c.precio_input_mtok is None
+
+
+class TestTema:
+    def test_por_omision_sigue_al_sistema(self):
+        assert Configuracion().tema == "auto" and TEMAS == ("auto", "claro", "oscuro")
+
+    def test_se_guarda_y_se_lee(self):
+        assert Configuracion.desde_dict(Configuracion(tema="oscuro").a_dict()).tema == "oscuro"
+
+    @pytest.mark.parametrize("valor", ["OSCURO", " Oscuro "])
+    def test_mayusculas_y_espacios_no_importan(self, valor):
+        assert Configuracion.desde_dict({"tema": valor}).tema == "oscuro"
+
+    @pytest.mark.parametrize("valor", ["rosa", "", None, 3, ["oscuro"]])
+    def test_un_valor_que_no_existe_vuelve_a_auto(self, valor):
+        assert Configuracion.desde_dict({"tema": valor}).tema == "auto"
+
+    def test_una_configuracion_antigua_sin_tema_sigue_funcionando(self):
+        assert Configuracion.desde_dict({"modelo": "claude-sonnet-5-5"}).tema == "auto"

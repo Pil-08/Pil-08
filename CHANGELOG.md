@@ -2,6 +2,23 @@
 
 All notable changes. Format based on [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [12.2.0] — 2026-10-05
+
+**Easy to open, easy to read.** The whole program is now one plain file you can download, read and run.
+
+### Added
+- **`claude_batch_monitor.py` — the entire program in a single file.** Plain Python: no packing, no obfuscation, no `exec`/`eval`. It opens a table of contents at the top and numbered sections below. It is *generated* from the modules in `claude_batch_monitor/` by `tools/build_single_file.py`; CI fails if it is out of date, runs the complete test suite against it, and tests that it contains no hidden-code tricks (`exec`, `eval`, decoding or decompressing code) and mentions only the web addresses it declares.
+- **It starts working on its own.** The only thing that does not ship with Python is the `anthropic` library: if it is missing, a window (or a question in the terminal) offers to install it — exactly `pip install anthropic`, nothing else — and reopens the program. Systems that refuse (Debian/Ubuntu "externally managed environment") get a private folder inside the program's data folder instead.
+- **Answers with formatting**: headings, bold, italic, `code`, code blocks, lists, quotes, tables and links are shown as such, with a *Con formato* switch to see the original text. What is saved, copied and exported is never altered.
+- **Dark theme** (*Options → Theme*): Automatic (follows the system), Light or Dark. Every text/background pair is tested for WCAG AA contrast.
+- **Instructions for every answer** in the simple mode's options (e.g. "answer in Spanish, briefly"); an empty-queue hint; a friendly error window when something unexpected happens — including at start-up, where double-clicking the file would otherwise close silently.
+- Commands shown to the user match their system (`py` on Windows, `python3` elsewhere; the single file, the package or the downloaded app, as appropriate).
+- The icon is drawn by code (no binary file to ship or doubt).
+
+### Changed
+- Clearer names everywhere (no jokes, no slang, no names that need explaining); the old `modo_fantasma` option is now *start minimized* (`iniciar_minimizado`) and the old key is no longer read.
+- Colours come from a palette (`gui/estilo.py`), so another theme is one more palette.
+
 ## [12.1.0] — 2026-10-04
 
 First public version of the rewrite. The original single-file script (v11.0.0) is preserved in the first commit; see [REVIEW.md](REVIEW.md) for the audit that motivated the rewrite.

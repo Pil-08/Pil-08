@@ -1,8 +1,8 @@
 # Review of the original v11 script
 
-This is a fresh audit of the original single-file script (`claude_batch_monitor.py` v11.0.0, kept verbatim in the first commit of this repository: `git show 72c79e5:claude_batch_monitor.py`). Line numbers refer to that file. For each finding: what was wrong, what it cost the user, and where v12 fixes it (and the test that keeps it fixed).
+This is a fresh audit of the original single-file script (v11.0.0, kept verbatim in the first commit of this repository: `git show 72c79e5:claude_batch_monitor.py` — the file of that name in the repository today is the v12 single-file build, not the original). Line numbers refer to that file. For each finding: what was wrong, what it cost the user, and where v12 fixes it (and the test that keeps it fixed).
 
-> **Provenance.** v12 is a rewrite of that script as a tested package. An earlier iteration of this work was done in a disposable environment that was lost before it reached a repository; **this version was rebuilt from the v11 file and the same design, then re-verified from scratch.** The findings below were re-derived by reading v11 again, not recalled from the lost notes.
+> **Provenance.** v12 is a rewrite of that script as a tested package (also distributed as one generated file, `claude_batch_monitor.py`, built from the modules and tested with the same suite). An earlier iteration of this work was done in a disposable environment that was lost before it reached a repository; **this version was rebuilt from the v11 file and the same design, then re-verified from scratch.** The findings below were re-derived by reading v11 again, not recalled from the lost notes.
 
 ## Money and data loss
 

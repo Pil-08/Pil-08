@@ -21,9 +21,20 @@
 
 ## Instalar
 
-**Sin Python** — en la página de [Releases](../../releases): `.exe` para Windows, `.zip` para macOS y un binario para Linux. No están firmados, así que la primera vez Windows (SmartScreen: *Más información → Ejecutar de todas formas*) y macOS (clic derecho → *Abrir*) avisarán.
+### La forma fácil: un solo archivo
 
-**Con Python 3.9 o superior** (hace falta Tk: en Debian/Ubuntu `sudo apt install python3-tk`):
+1. Instala [Python 3.9 o superior](https://www.python.org/downloads/). En Windows y macOS deja marcada la casilla *tcl/tk*; en Debian/Ubuntu: `sudo apt install python3-tk`.
+2. Descarga **[`claude_batch_monitor.py`](claude_batch_monitor.py)**: ese único archivo **es** todo el programa (en GitHub, ábrelo y pulsa *Download raw file*).
+3. **Windows:** doble clic. **macOS / Linux:** en una terminal, `python3 claude_batch_monitor.py`.
+4. La primera vez te ofrece instalar, con un botón, la única librería que necesita (`anthropic`, desde PyPI). Después pegas tu clave de API, escribes una pregunta y pulsas Enter.
+
+Es Python normal y legible: ábrelo con cualquier editor. Arriba tiene un índice con las secciones numeradas. No hay instalador, ni empaquetado, ni pasos ocultos. *(Opcional, en Windows: renómbralo a `claude_batch_monitor.pyw` para que no se abra una ventana negra junto al programa.)*
+
+### Sin Python
+
+En la página de [Releases](../../releases): `.exe` para Windows, `.zip` para macOS y un binario para Linux. No están firmados, así que la primera vez Windows (SmartScreen: *Más información → Ejecutar de todas formas*) y macOS (clic derecho → *Abrir*) avisarán.
+
+### Desde el repositorio (para leerlo, cambiarlo o colaborar)
 
 ```bash
 git clone https://github.com/Pil-08/claude-batch-monitor
@@ -33,6 +44,8 @@ python -m claude_batch_monitor
 ```
 
 `[all]` añade tres extras opcionales: **keyring** (guardar la clave en el llavero del sistema), **bandeja del sistema** (seguir trabajando con la ventana cerrada) y **notificaciones de escritorio**. Sin ellos todo funciona igual, salvo esas tres cosas.
+
+En todos los ejemplos de esta guía, `python -m claude_batch_monitor` equivale a `python3 claude_batch_monitor.py` (en Windows, `py` en lugar de `python3`).
 
 ## Primeros pasos
 
@@ -50,7 +63,8 @@ El que se abre por defecto. Escribes en la caja de arriba y pulsas **Enter** (*M
 - **Guardar todo…** exporta cola y respuestas a `.csv`, `.jsonl`, `.md` o `.txt`.
 - **Nueva cola** vacía la lista (la anterior se queda en disco).
 - Si cierras el programa con preguntas pendientes, te pregunta si quieres dejarlo trabajando en la bandeja o cerrarlo. Lo pendiente **no se pierde**: al volver a abrir te lo ofrece (o lo retoma solo si activas *Continuar sola lo pendiente* en Opciones).
-- **Opciones**: modelo, tope de gasto, idioma (español/inglés), enlace al modo avanzado.
+- Las respuestas se ven **con formato** (títulos, negrita, cursiva, listas, citas, código, tablas y enlaces). El interruptor *Con formato* enseña el texto original; lo que se guarda, se copia y se exporta no cambia nunca.
+- **Opciones**: modelo, **instrucciones para todas las respuestas** (p. ej. «Responde siempre en español y con frases cortas»; se envían con cada pregunta), tope de gasto, idioma (español/inglés), **tema** (automático, claro u oscuro; se aplica al reiniciar) y enlace al modo avanzado.
 
 Valores prudentes la primera vez: tope de **2 $**, respuestas de hasta 8 000 tokens y esfuerzo medio si el modelo lo admite.
 
@@ -134,10 +148,13 @@ El programa **no** intenta adivinar el reinicio de una suscripción de claude.ai
 
 - Todo se guarda en tu equipo, en `%APPDATA%\ClaudeMonitor` (Windows), `~/Library/Application Support/ClaudeMonitor` (macOS) o `~/.config/ClaudeMonitor` (Linux). Se puede cambiar con la variable `CLAUDE_MONITOR_HOME` (útil para una instalación portátil).
   - `config.json` (ajustes, **sin claves**) · `state.json` (gasto acumulado) · `claude_monitor.log` · `responses/` (un `job_<id>.json` por lote y un `.txt` por respuesta).
-- Tus preguntas y respuestas viajan **solo** a Anthropic (y los avisos, a Telegram si lo configuras). El programa no tiene servidor propio ni telemetría.
+- Tus preguntas y respuestas viajan **solo** a `api.anthropic.com` (y los avisos, a `api.telegram.org` si configuras Telegram; y la descarga de `anthropic` desde PyPI, si aceptas instalarla). El programa no tiene servidor propio, ni telemetría, ni comprobación de actualizaciones, ni cuentas. Los enlaces (consola, facturación, documentación) se abren en tu navegador solo cuando pulsas.
 - La clave y el token de Telegram **nunca** se escriben en archivos, registros ni exportaciones; los errores de red se registran sin su texto porque la URL de Telegram contiene el token.
 - Los lotes terminados se borran a los 30 días (configurable, 0 = nunca); los que tienen órdenes sin enviar **no se borran jamás**.
-- Mientras trabaja, el programa pide al sistema que no se suspenda (Windows, macOS y Linux con `systemd`).
+- Mientras trabaja, el programa pide al sistema que no se suspenda (Windows: una llamada de Win32; macOS: `caffeinate`; Linux con `systemd`: `systemd-inhibit`).
+- Los demás programas que lanza: `pip install anthropic` (solo si aceptas), `xdg-open` / `open` / `os.startfile` para abrir una carpeta cuando pulsas el botón, y `defaults` / `gsettings` (en Windows, el registro) para saber si tu sistema usa el tema oscuro. Nada más.
+- **No hay código escondido.** El archivo no contiene `exec`, `eval`, `compile` de cadenas, nada decodificado ni descomprimido. Una prueba lo comprueba en cada generación, y otra comprueba que las únicas direcciones web del archivo son las anteriores.
+- **Puedes comprobarlo tú**: `python tools/build_single_file.py --check` vuelve a generar el archivo único a partir de los módulos de `claude_batch_monitor/` y te dice si difieren.
 
 ## Preguntas frecuentes
 
@@ -153,6 +170,9 @@ El programa **no** intenta adivinar el reinicio de una suscripción de claude.ai
 
 ## Problemas habituales
 
+- **Con doble clic no pasa nada, o se abre y se cierra** (Windows): abre una terminal en la carpeta del archivo y ejecuta `py claude_batch_monitor.py`; ahí verás el mensaje. Si el programa tropieza con algo inesperado, además enseña una ventana con el motivo y la ruta del registro.
+- **En macOS el doble clic abre un editor**: usa la Terminal (`python3 claude_batch_monitor.py`) o *Abrir con → Python Launcher*.
+- **«externally-managed-environment» al instalar `anthropic`** (Debian, Ubuntu, Fedora…): el programa lo detecta y crea una carpeta propia (`venv`, dentro de su carpeta de datos) donde instalarla; no toca el Python del sistema.
 - **«Este Python no incluye tkinter»**: instala `python3-tk` (Linux) o reinstala Python desde python.org marcando *tcl/tk* (Windows/macOS). Mientras tanto la terminal funciona.
 - **En un servidor sin pantalla** el programa avisa y sugiere `--cli`.
 - **No aparece el icono de la bandeja en Linux**: depende del entorno de escritorio (GNOME necesita la extensión *AppIndicator*). Sin bandeja, el programa simplemente no ofrece esa opción.

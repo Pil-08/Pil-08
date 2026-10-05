@@ -16,6 +16,12 @@ for _var in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "ANT
 
 import pytest  # noqa: E402
 
+if os.environ.get("CBM_ARCHIVO_UNICO"):
+    # Los mismos tests contra `claude_batch_monitor.py` (el archivo único) en vez de contra el paquete.
+    from . import archivo_unico
+
+    archivo_unico.instalar()
+
 from claude_batch_monitor import paths, platform_utils, state  # noqa: E402
 from claude_batch_monitor.core import base  # noqa: E402
 from claude_batch_monitor.gui import i18n  # noqa: E402

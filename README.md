@@ -1,9 +1,10 @@
 # Samuel Pil
 
-Estudio Informática en la UPV y vivo en Donostia. Fuera de clase hago webs a mano para bares,
-cafeterías y restaurantes de la ciudad, con HTML, CSS y JavaScript y sin frameworks. Me
-interesa que cada una sea un trabajo entero: la carta bien puesta, varios idiomas y nada que
-se rompa con el tiempo por depender de una librería.
+Estudio Informática en la UPV y vivo en Donostia. Fuera de clase hago webs para bares,
+cafeterías y restaurantes de la ciudad. Las de Oasis Kafe, Buga Ramen y Onigiri Edorin están
+escritas a mano, con HTML, CSS y JavaScript y sin frameworks. Me interesa que cada una sea un
+trabajo entero: la carta bien puesta, varios idiomas y nada que se rompa con el tiempo por
+depender de una librería.
 
 ## Lo que hay por aquí
 
@@ -20,9 +21,10 @@ coreana, con imágenes en AVIF y WebP, tipografías propias y respeto al «reduc
 tres idiomas. [Verla](https://onigiri-edorin.pages.dev)
 
 **[LA COMMANDE](https://github.com/Pil-08/LA-COMMANDE)** — la web con la que ofrezco este trabajo
-a negocios de hostelería de Donostia. [Verla](https://la-commande.pages.dev)
+a negocios de hostelería de Donostia. Se publica como un único HTML empaquetado.
+[Verla](https://la-commande.pages.dev)
 
-**[Sistema de facturación de un supermercado](https://github.com/Pil-08/Java-OOP-Sistema-Facturacion-Supermercado)**
+**[Costes de transporte de un supermercado](https://github.com/Pil-08/Java-OOP-Sistema-Facturacion-Supermercado)**
 — una práctica de Java orientado a objetos: clase abstracta, herencia, polimorfismo y
 enumerados.
 

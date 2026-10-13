@@ -35,7 +35,7 @@ tray = ["pystray>=0.19", "Pillow>=10"]
 # Desktop notifications
 notify = ["plyer>=2.1"]
 all = ["keyring>=24", "pystray>=0.19", "Pillow>=10", "plyer>=2.1"]
-dev = ["pytest>=8", "ruff>=0.5", "pyinstaller>=6", "Pillow>=10"]
+dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.5", "pyinstaller>=6", "Pillow>=10"]
 
 [project.scripts]
 claude-batch-monitor = "claude_batch_monitor.__main__:main"
@@ -57,6 +57,7 @@ markers = [
     "gui: needs tkinter and a display (use xvfb-run on Linux servers)",
     "keepawake_real: exercises the real KeepAwake class (every other test stubs it out)",
     "idioma_real: looks at the real system language (every other test pins it to Spanish)",
+    "simulacro: runs the program against a fake Anthropic server over real sockets (a few seconds each)",
 ]
 
 [tool.ruff]

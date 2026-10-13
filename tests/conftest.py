@@ -99,3 +99,31 @@ def raiz():
     except tk.TclError:
         pass
     gc.collect()
+
+
+@pytest.fixture
+def api(monkeypatch):
+    """Un servidor falso por prueba (ver servidor_falso.py), y el SDK apuntando a él."""
+    from .servidor_falso import ServidorFalso
+
+    with ServidorFalso() as servidor:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", servidor.url)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", servidor.clave)
+        for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        yield servidor
+
+
+@pytest.fixture
+def esperas(monkeypatch):
+    """Comprime el tiempo: cada espera del motor dura como mucho 20 ms, y se anota lo que pidió esperar."""
+    pedidas: list[float] = []
+    original = base.EngineBase.esperar
+
+    def esperar(self, segundos, cb):
+        pedidas.append(segundos)
+        return original(self, min(segundos, 0.02), cb)
+
+    monkeypatch.setattr(base.EngineBase, "esperar", esperar)
+    return pedidas

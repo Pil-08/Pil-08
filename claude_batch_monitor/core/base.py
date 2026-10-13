@@ -13,6 +13,7 @@ Las reglas que aquí se fijan son las que más dinero y datos protegen:
 
 from __future__ import annotations
 
+import math
 import random
 import re
 import threading
@@ -29,10 +30,12 @@ try:
 except ImportError:  # el arranque lo explica y ofrece instalarla (ver instalacion.py)
     anthropic = None  # type: ignore[assignment]
 
+from .. import paths
 from ..config import Configuracion
 from ..export import MARCA_RESPUESTA, MARCA_SOLICITUD
 from ..job import STATUS_COMPLETED, STATUS_FAILED, STATUS_REFUSED, Job, JobMessage
 from ..notify import notificar
+from ..parsing import limpiar_sustitutos
 from ..paths import logger, write_atomic
 from ..platform_utils import comando_para_instalar
 from ..pricing import (
@@ -47,7 +50,16 @@ from ..pricing import (
 )
 from ..ratelimit import RateLimitTracker, observar_seguro, parse_reset
 from ..state import EstadoMonitor, obtener_api_key
-from .errors import Categoria, ErrorApi, analizar_error, es_sin_conexion
+from .errors import (
+    Categoria,
+    ErrorApi,
+    analizar_error,
+    es_corte_de_conexion,
+    es_respuesta_ilegible,
+    es_sin_conexion,
+    es_timeout,
+    timeout_con_peticion_enviada,
+)
 
 MAX_BACKOFF_SECONDS = 1800
 MARGEN_RATE_LIMIT_SEC = 2.0
@@ -56,6 +68,10 @@ MARGEN_RATE_LIMIT_SEC = 2.0
 MAX_429_SIN_INFO = 10
 # Tiempo máximo acumulado esperando a que vuelva la conexión antes de rendirse.
 MAX_SIN_CONEXION_SEC = 600
+# Lo más que se hace caso a un `retry-after`; más allá (o un valor que no es un número) se ignora.
+MAX_ESPERA_API_SEC = 24 * 3600
+# Veces que una misma orden puede agotar el tiempo DESPUÉS de enviarse: cada una pudo cobrarse.
+MAX_TIMEOUTS_POR_ORDEN = 3
 RESPUESTA_VACIA = "(Claude devolvió una respuesta vacía.)"
 AVISO_TRUNCADA = "[ADVERTENCIA: respuesta truncada por el límite de tokens]"
 
@@ -103,6 +119,7 @@ class Contadores:
     sin_info_429: int = 0
     intentos_sin_conexion: int = 0
     segundos_sin_conexion: float = 0.0
+    timeouts_enviados: int = 0  # tiempos agotados con la petición ya enviada (pudo cobrarse)
 
 
 @dataclass
@@ -149,6 +166,15 @@ def build_request_params(config: Configuracion, texto: str) -> dict:
     return params
 
 
+def _segundos_de_cabecera(valor: Any) -> Optional[float]:
+    """Los segundos de un `retry-after`, o None si no es un número razonable (NaN, infinito, negativo, enorme)."""
+    try:
+        segundos = float(valor)
+    except (TypeError, ValueError):
+        return None
+    return segundos if math.isfinite(segundos) and 0 <= segundos <= MAX_ESPERA_API_SEC else None
+
+
 def _categoria_rechazo(response: Any) -> str:
     detalles = getattr(response, "stop_details", None)
     if detalles is None:
@@ -181,12 +207,16 @@ class EngineBase:
         self._lock_estado = threading.RLock()
         self._cond = threading.Condition(self._lock_estado)
         self._reservado = Decimal(0)
+        # Peor caso de las peticiones que se abandonaron por tiempo sin saber si el servidor las cobró:
+        # cuentan contra el tope (si no, un servidor lento podría cobrar muchas veces sin que se viera).
+        self._incierto = Decimal(0)
+        self._con_timeout: set[int] = set()  # órdenes que ya agotaron el tiempo: se reintentan en streaming
 
     # ------------------------------------------------------------------
     # Cliente
     # ------------------------------------------------------------------
 
-    def inicializar_cliente(self) -> None:
+    def _cliente_nuevo(self) -> Any:
         if anthropic is None:
             raise ValueError(f"Falta la librería 'anthropic'. Instálala con: {comando_para_instalar('anthropic')}")
         api_key = obtener_api_key()
@@ -194,9 +224,12 @@ class EngineBase:
             raise ValueError(
                 "No hay API key de Anthropic. Pégala en la aplicación o define ANTHROPIC_API_KEY."
             )
-        self._client = anthropic.Anthropic(
+        return anthropic.Anthropic(
             api_key=api_key, timeout=float(self.config.timeout_api_sec), max_retries=0
         )
+
+    def inicializar_cliente(self) -> None:
+        self._client = self._cliente_nuevo()
 
     @property
     def client(self) -> Any:
@@ -259,12 +292,9 @@ class EngineBase:
         el cupo, adivinarlo es peor.
         """
         h = self._cabeceras(error)
-        retry_after = h.get("retry-after")
-        if retry_after:
-            try:
-                return float(retry_after) + MARGEN_RATE_LIMIT_SEC, True
-            except (TypeError, ValueError):
-                pass
+        retry_after = _segundos_de_cabecera(h.get("retry-after"))
+        if retry_after is not None:
+            return retry_after + MARGEN_RATE_LIMIT_SEC, True
 
         agotados = []
         for fam in ("requests", "tokens", "input-tokens", "output-tokens"):
@@ -282,8 +312,9 @@ class EngineBase:
                 return segundos + MARGEN_RATE_LIMIT_SEC, True
 
         m = re.search(r"try again in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
-        if m:
-            return float(m.group(1)) + MARGEN_RATE_LIMIT_SEC, True
+        indicado = _segundos_de_cabecera(m.group(1)) if m else None
+        if indicado is not None:
+            return indicado + MARGEN_RATE_LIMIT_SEC, True
         return 60.0, False
 
     def espera_rate_limit(self, error: Any) -> float:
@@ -296,17 +327,17 @@ class EngineBase:
         vez y vuelven a tumbar al servidor. Sortear en todo el intervalo [0, techo]
         los desincroniza.
         """
-        retry_after = self._cabeceras(error).get("retry-after")
-        if retry_after:
-            try:
-                return float(retry_after) + 5
-            except (TypeError, ValueError):
-                pass
+        retry_after = _segundos_de_cabecera(self._cabeceras(error).get("retry-after"))
+        if retry_after is not None:
+            return retry_after + 5
         techo = min(30 * (2 ** min(max(intentos - 1, 0), 6)), MAX_BACKOFF_SECONDS)
         return max(1.0, random.uniform(0, techo))
 
     def esperar(self, segundos: float, cb: Callbacks) -> bool:
         """Espera cancelable. False si se interrumpió (parada o hora límite)."""
+        if not math.isfinite(segundos):
+            segundos = 60.0  # un valor que no es un tiempo no puede dejar el programa esperando para siempre
+        segundos = max(0.0, segundos)
         fin = time.monotonic() + segundos
         cb.emit("tick", segundos, segundos)
         while True:
@@ -374,7 +405,7 @@ class EngineBase:
         tope = self.config.tope_gasto_usd
         if tope <= 0:
             return None
-        return max(Decimal(0), tope - self.gasto_actual())
+        return max(Decimal(0), tope - self.gasto_actual() - self._incierto)
 
     def _reservar(self, coste_max: Decimal, cb: Callbacks) -> bool:
         """Reserva el peor caso de una petición. False si el tope impide enviarla.
@@ -389,15 +420,19 @@ class EngineBase:
             while True:
                 if self.evento_detener.is_set():
                     return False
-                gastado = self.estado.gasto_acumulado_usd
+                gastado = self.estado.gasto_acumulado_usd + self._incierto
                 if gastado + self._reservado + coste_max <= tope:
                     self._reservado += coste_max
                     return True
                 if self._reservado == 0:
+                    dudoso = (
+                        f" (incluye hasta {formatear_usd(self._incierto)} de peticiones que agotaron el tiempo "
+                        "y podrían haberse cobrado)" if self._incierto > 0 else ""
+                    )
                     texto = (
                         f"TOPE DE GASTO: la siguiente orden podría costar hasta {formatear_usd(coste_max)} "
                         f"y solo quedan {formatear_usd(max(Decimal(0), tope - gastado))} de tu tope de "
-                        f"{formatear_usd(tope, 2)}. Lote detenido sin enviarla. "
+                        f"{formatear_usd(tope, 2)}{dudoso}. Lote detenido sin enviarla. "
                         "Sube el tope o baja max_tokens."
                     )
                     logger.warning(texto)
@@ -444,6 +479,7 @@ class EngineBase:
         lote: bool = False,
         reserva: Decimal = Decimal(0),
         comprobar_tope: bool = True,
+        guardar_ya: bool = True,
     ) -> bool:
         """Guarda una respuesta ya recibida (y pagada). True si se puede seguir.
 
@@ -454,11 +490,14 @@ class EngineBase:
         `reserva` es el peor caso que se reservó antes de enviar: se canjea por el
         coste real en el mismo instante en que se suma el gasto, sin dejar un hueco
         en el que otro hilo pueda reservar de más.
+
+        `guardar_ya=False` (la recogida de un lote) deja para un punto de control el guardado del estado del lote y
+        del gasto: reescribirlos enteros con cada uno de 100 000 resultados costaría más de lo que pesa el lote.
         """
         canjeada = [False]
         try:
             return self._registrar(
-                msg, response, ciclo, cb, latency_ms, lote, reserva, canjeada, comprobar_tope
+                msg, response, ciclo, cb, latency_ms, lote, reserva, canjeada, comprobar_tope, guardar_ya
             )
         finally:
             if reserva and not canjeada[0]:  # algo falló antes de canjearla: no dejarla colgada
@@ -475,6 +514,7 @@ class EngineBase:
         reserva: Decimal,
         canjeada: list,
         comprobar_tope: bool,
+        guardar_ya: bool = True,
     ) -> bool:
         consumo = leer_consumo(getattr(response, "usage", None))
         coste = coste_consumo(consumo, self.precios, lote)
@@ -486,7 +526,7 @@ class EngineBase:
             for b in (getattr(response, "content", None) or [])
             if isinstance(getattr(b, "text", None), str)
         ]
-        texto = "\n".join(bloques).strip()
+        texto = limpiar_sustitutos("\n".join(bloques).strip())
         truncada = stop in ("max_tokens", "model_context_window_exceeded")
 
         if rechazada:
@@ -508,20 +548,21 @@ class EngineBase:
             if not rechazada:
                 self.estado.exitos += 1
                 self.estado.ultimo_exito = datetime.now(timezone.utc).isoformat()
-            self.estado.guardar()
+            estado_guardado = self.estado.guardar() if guardar_ya else True
             gasto = self.estado.gasto_acumulado_usd
             if reserva:  # canje atómico: peor caso reservado -> coste real
                 self._reservado = max(Decimal(0), self._reservado - reserva)
                 canjeada[0] = True
                 self._cond.notify_all()
 
+        error_de_disco: Optional[BaseException] = None
+        contenido = f"{MARCA_SOLICITUD}\n{msg.text}\n\n{MARCA_RESPUESTA}\n{texto}\n"
         try:
-            write_atomic(
-                self.job.response_path(msg.id, ciclo),
-                f"{MARCA_SOLICITUD}\n{msg.text}\n\n{MARCA_RESPUESTA}\n{texto}\n",
-            )
-        except OSError:
+            write_atomic(self.job.response_path(msg.id, ciclo), contenido)
+        except OSError as error:
             logger.exception("No se pudo guardar la respuesta de la orden %s", msg.id)
+            error_de_disco = error
+            self.job.respuestas_sin_guardar[msg.id] = (ciclo, contenido)  # pagada: que se pueda ver, copiar y volcar luego
 
         msg.status = STATUS_REFUSED if rechazada else STATUS_COMPLETED
         msg.truncated = truncada and not rechazada
@@ -532,19 +573,77 @@ class EngineBase:
         msg.latency_ms = latency_ms
         msg.detalle = detalle
         msg.error_type = "refusal" if rechazada else ""
-        self.job.save()
+        lote_guardado = self.job.save() if guardar_ya else True
 
         cb.emit("resultado", msg)
         cb.emit("gasto", gasto, consumo)
+        sin_guardar = [
+            nombre for nombre, bien in (
+                ("la respuesta", error_de_disco is None),
+                ("el estado del lote", lote_guardado),
+                ("el gasto acumulado", estado_guardado),
+            ) if not bien
+        ]
+        if sin_guardar:
+            self._parar_por_disco(cb, msg, sin_guardar, error_de_disco)
+            return False
         # En un lote ya está todo pagado en el servidor: el tope se comprueba una vez al final.
         return self._comprobar_tope(cb) if comprobar_tope else True
 
-    def marcar_fallo(self, msg: JobMessage, detalle: str, cb: Callbacks, error_type: str = "other") -> None:
+    def volcar_respuestas_sin_guardar(self) -> bool:
+        """Escribe en disco las respuestas pagadas que antes no cupieron. True si no queda ninguna por escribir."""
+        pendientes = self.job.respuestas_sin_guardar
+        for msg_id, (ciclo, contenido) in list(pendientes.items()):
+            try:
+                write_atomic(self.job.response_path(msg_id, ciclo), contenido)
+            except OSError:
+                return False
+            pendientes.pop(msg_id, None)
+            logger.info("Respuesta de la orden %s guardada por fin en disco", msg_id)
+        return True
+
+    def _parar_por_disco(
+        self, cb: Callbacks, msg: Optional[JobMessage], sin_guardar: list[str], error: Optional[BaseException]
+    ) -> None:
+        """Lo pagado no se puede escribir en disco: seguir sería pagar respuestas que se perderían."""
+        with self._cond:  # mirar y marcar, de una vez: con varios hilos, solo uno debe ser «el primero»
+            primera_vez = self.stop_reason is None or self.stop_reason in _DEBILES
+            self.marcar_parada(StopReason.FATAL)
+        if not primera_vez:
+            return  # con varios hilos, los demás fallarán igual: se cuenta una sola vez
+        causa = f" ({error})" if error is not None else ""
+        de_la_orden = f" de la orden {msg.id}" if msg is not None else ""
+        texto = (
+            f"No se pudo guardar en el disco {' ni '.join(sin_guardar)}{de_la_orden}{causa}. "
+            "Se detiene todo para no pagar respuestas que luego no se podrían conservar. La respuesta sigue "
+            "disponible mientras el programa esté abierto: cópiala o expórtala. "
+            f"Libera espacio o revisa los permisos de {paths.DATA_DIR} y reanuda."
+        )
+        logger.critical(texto)
+        cb.emit("error", texto)
+        self._avisar("No se puede guardar", texto)
+
+    def marcar_fallo(
+        self, msg: JobMessage, detalle: str, cb: Callbacks, error_type: str = "other", guardar: bool = True
+    ) -> None:
         msg.status = STATUS_FAILED
         msg.detalle = detalle
         msg.error_type = error_type
-        self.job.save()
+        if guardar:
+            self.job.save()
         cb.emit("resultado", msg)
+
+    def punto_de_control(self, cb: Callbacks) -> bool:
+        """Escribe en disco el estado del lote y el gasto acumulado. False (y se para) si el disco no lo admite."""
+        with self._cond:
+            estado_ok = self.estado.guardar()
+        lote_ok = self.job.save()
+        if estado_ok and lote_ok:
+            return True
+        self._parar_por_disco(
+            cb, None, [n for n, bien in (("el estado del lote", lote_ok), ("el gasto acumulado", estado_ok)) if not bien], None
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Cierre
@@ -555,6 +654,7 @@ class EngineBase:
         justo cuando algo falla es cuando más falta hace saber qué se hizo y qué se pagó."""
         total = self.job.total_count()
         completados = self.job.completed_count()
+        self.volcar_respuestas_sin_guardar()  # si el disco ya admite escrituras, que no se pierda nada de lo pagado
         try:
             partes = [
                 f"# Resumen del Ciclo {ciclo}",
@@ -615,22 +715,27 @@ class EngineBase:
 
         # OJO con el orden: APITimeoutError HEREDA de APIConnectionError. Con el orden
         # inverso un timeout normal se tomaba por "sin red" y abortaba el lote entero (C5).
-        if isinstance(error, anthropic.APITimeoutError):
-            return self._reintentar_con_backoff(msg, error, cb, cont, "Timeout de la API")
+        # (En streaming, un tiempo agotado entre trozos sale sin envolver: se reconoce por el nombre.)
+        if isinstance(error, anthropic.APITimeoutError) or (
+            not isinstance(error, anthropic.APIStatusError) and es_timeout(error)
+        ):
+            return self._manejar_timeout(msg, error, cb, cont)
 
         if isinstance(error, anthropic.APIConnectionError):
             if es_sin_conexion(error):
                 return self._esperar_conexion(cb, cont)
-            # La conexión se cortó a mitad: no sabemos si el servidor llegó a procesar
-            # la petición. Parar evita facturar un duplicado.
-            detalle = "Se cortó la conexión con la API. Lote pausado para evitar cobros duplicados."
-            self._fallar(msg, detalle, cb, "connection")
-            cb.emit("error", detalle)
-            self.marcar_parada(StopReason.NETWORK)
-            return Decision.PARAR
+            return self._parar_por_corte(msg, cb)
 
         if isinstance(error, anthropic.APIStatusError):
             return self._manejar_estado(analizar_error(error), error, cb, cont, msg)
+
+        # Con la respuesta en streaming, el SDK deja pasar el corte de la conexión sin envolverlo.
+        if es_corte_de_conexion(error):
+            return self._parar_por_corte(msg, cb)
+
+        # Una respuesta entera pero que no es de la API (portal cautivo, proxy…): no la procesó el servidor.
+        if es_respuesta_ilegible(error):
+            return self._reintentar_con_backoff(msg, error, cb, cont, "Respuesta ilegible de la API")
 
         logger.error("Error inesperado", exc_info=error)
         detalle = f"Error inesperado: {error}"
@@ -638,6 +743,62 @@ class EngineBase:
         cb.emit("error", detalle)
         self.marcar_parada(StopReason.FATAL)
         return Decision.PARAR
+
+    def manejar_error_de_consulta(self, error: Exception, cb: Callbacks, cont: Contadores) -> Decision:
+        """Como `manejar_error`, para una consulta que ni cuesta ni cambia nada en el servidor.
+
+        Ver el estado de un lote, bajar sus resultados o listar los lotes recientes se puede repetir sin riesgo de
+        cobrar dos veces. Por eso un corte de la conexión o un tiempo agotado se reintentan con espera (hasta el
+        máximo de errores) en vez de parar: pararía justo la espera de hasta 24 h que más cuesta repetir a mano.
+        Todo lo demás (429, saldo, clave, 5xx, sin conexión…) sigue la política de siempre.
+        """
+        if not isinstance(error, anthropic.APIStatusError):
+            if isinstance(error, anthropic.APITimeoutError) or es_timeout(error):
+                observar_seguro(self.rate_limits, error)
+                return self._reintentar_con_backoff(None, error, cb, cont, "El servidor tardó demasiado en responder")
+            if not es_sin_conexion(error) and (
+                isinstance(error, anthropic.APIConnectionError) or es_corte_de_conexion(error)
+            ):
+                observar_seguro(self.rate_limits, error)
+                return self._reintentar_con_backoff(None, error, cb, cont, "Se cortó la conexión con el servidor")
+        return self.manejar_error(error, cb, cont)
+
+    def _parar_por_corte(self, msg: Optional[JobMessage], cb: Callbacks) -> Decision:
+        """La conexión se cortó a mitad: no sabemos si el servidor llegó a procesar la petición.
+
+        Parar evita facturar un duplicado.
+        """
+        detalle = "Se cortó la conexión con la API. Lote pausado para evitar cobros duplicados."
+        self._fallar(msg, detalle, cb, "connection")
+        cb.emit("error", detalle)
+        self.marcar_parada(StopReason.NETWORK)
+        return Decision.PARAR
+
+    def _manejar_timeout(self, msg: Optional[JobMessage], error: Exception, cb: Callbacks, cont: Contadores) -> Decision:
+        """Se agotó el tiempo. Si la petición ya había salido, el servidor pudo procesarla y cobrarla."""
+        if timeout_con_peticion_enviada(error):
+            cont.timeouts_enviados += 1
+            if cont.timeouts_enviados >= MAX_TIMEOUTS_POR_ORDEN:
+                donde = f" en la orden {msg.id}" if msg is not None else ""
+                detalle = (
+                    f"La API no responde a tiempo{donde} (se agotó el tiempo {cont.timeouts_enviados} veces con la "
+                    "petición ya enviada). Se para para no cobrar lo mismo varias veces: sube el tiempo máximo por "
+                    "petición o baja max_tokens."
+                )
+                self._fallar(msg, detalle, cb, "timeout")
+                cb.emit("error", detalle)
+                self._avisar("Lote pausado", detalle)
+                self.marcar_parada(StopReason.NETWORK)
+                return Decision.PARAR
+        return self._reintentar_con_backoff(msg, error, cb, cont, "Timeout de la API")
+
+    def _anotar_incierto(self, coste_max: Decimal, msg: Optional[JobMessage]) -> None:
+        """Una petición se abandonó por tiempo con el servidor posiblemente trabajando: su peor caso cuenta como gasto."""
+        with self._cond:
+            self._incierto += coste_max
+            if msg is not None:
+                self._con_timeout.add(msg.id)  # el reintento va en streaming: no tiene un tiempo total que agotar
+        logger.warning("Petición abandonada por tiempo: se cuenta hasta %s como posible gasto", formatear_usd(coste_max))
 
     def _manejar_estado(
         self,

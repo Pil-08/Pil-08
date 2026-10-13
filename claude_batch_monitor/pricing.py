@@ -14,6 +14,7 @@ Reglas de facturación que se modelan aquí:
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from decimal import Decimal
@@ -207,7 +208,14 @@ def soporta_esfuerzo(modelo: str, nivel: Optional[str] = None) -> Optional[bool]
 def _contador(obj: Any, nombre: str) -> int:
     """Lee un contador de tokens de un objeto `usage` sin fiarse de que exista."""
     valor = getattr(obj, nombre, 0)
+    if isinstance(valor, str):
+        try:
+            valor = int(valor.strip())  # un intermediario que convierte los números en texto: se cuenta igual, no como cero
+        except ValueError:
+            return 0
     if isinstance(valor, bool) or not isinstance(valor, (int, float, Decimal)):
+        return 0
+    if (isinstance(valor, float) and not math.isfinite(valor)) or (isinstance(valor, Decimal) and not valor.is_finite()):
         return 0
     return max(0, int(valor))
 

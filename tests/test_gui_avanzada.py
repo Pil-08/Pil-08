@@ -1000,6 +1000,74 @@ class TestModoYCierre:
         assert app.var_cuenta.get() == "2 órdenes detectadas" and app.v["modelo"].get() == "claude-haiku-4-5"
 
 
+class TestCancelarElLoteEnElServidor:
+    """«Detener» en modo lote: el lote ya está en el servidor y se cobra; hay que poder cancelarlo desde aquí."""
+
+    @staticmethod
+    def con_lote_en_vuelo(raiz, api):
+        from claude_batch_monitor.ejecutor import motor_para
+
+        api.retraso_lote = 60
+        app = crear(raiz, config=cfg(modo="lote"))
+        app.ejecutor._fabrica = motor_para
+        escribir(app, "a", "b", "c")
+        assert app.iniciar(), app.dialogos
+        assert bombear(raiz, lambda: bool(app.job and app.job.batch_id), timeout=10)
+        return app
+
+    def test_si_se_acepta_se_cancela_en_el_servidor_y_se_puede_recoger_despues(self, raiz, api):
+        app = self.con_lote_en_vuelo(raiz, api)
+        batch_id = app.job.batch_id
+        app.responde_si = True
+        app.detener()
+        assert dialogos(app, "confirmar")[-1][1] == "Detener el lote"
+        assert "cancelando el lote en el servidor" in app.var_estado.get()
+        assert bombear(raiz, lambda: terminado(app) and api.cancelados == [batch_id], timeout=10)
+        assert bombear(raiz, lambda: "El servidor aceptó la cancelación" in app.txt_log.get("1.0", "end"), timeout=10)
+        assert app.job.batch_id == batch_id and "disabled" not in app.boton_reanudar.state()
+        assert app.reanudar()                                 # recoge lo que quedó: todo cancelado
+        assert bombear(raiz, lambda: terminado(app), timeout=10)
+        assert [m.error_type for m in app.job.messages] == ["canceled"] * 3
+
+    def test_si_se_rechaza_solo_se_deja_de_esperar_y_el_lote_sigue_en_el_servidor(self, raiz, api):
+        app = self.con_lote_en_vuelo(raiz, api)
+        batch_id = app.job.batch_id
+        app.responde_si = False
+        app.detener()
+        assert bombear(raiz, lambda: terminado(app), timeout=10)
+        assert api.cancelados == [] and app.job.batch_id == batch_id
+        api.retraso_lote = 0                                   # ahora el servidor termina
+        assert app.reanudar()
+        assert bombear(raiz, lambda: terminado(app), timeout=30)
+        assert app.job.completed_count() == 3 and len(api.lotes) == 1
+
+    def test_si_el_servidor_no_puede_cancelar_se_avisa(self, raiz, api):
+        app = self.con_lote_en_vuelo(raiz, api)
+        app.responde_si = True
+        api.lotes.clear()                                      # como si el lote ya no existiera
+        app.detener()
+        assert bombear(raiz, lambda: any("No se pudo cancelar" in d[2] for d in dialogos(app, "aviso")), timeout=10)
+
+    def test_en_modo_inmediato_detener_no_pregunta_nada(self, raiz, con_clave):
+        entrada, suelta = threading.Event(), threading.Event()
+        app = crear(raiz)
+        original = app.fab.cliente.messages._siguiente
+
+        def lenta():
+            entrada.set()
+            suelta.wait(5)
+            return original()
+
+        app.fab.cliente.messages._siguiente = lenta
+        escribir(app, "a", "b")
+        app.iniciar()
+        assert bombear(raiz, entrada.is_set)
+        app.detener()
+        suelta.set()
+        assert bombear(raiz, lambda: terminado(app), timeout=10)
+        assert [d for d in dialogos(app, "confirmar") if d[1] == "Detener el lote"] == []
+
+
 def test_los_lotes_pendientes_cuentan_como_trabajo_para_el_boton():
     # `hay_trabajo` incluye fallidas y pendientes; es lo que decide si «Reanudar» está activo.
     job = Job.crear(["a", "b"], cfg())

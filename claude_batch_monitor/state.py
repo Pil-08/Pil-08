@@ -36,7 +36,8 @@ class EstadoMonitor:
     tokens_input_total: int = 0
     tokens_output_total: int = 0
 
-    def guardar(self, path: Optional[Path] = None) -> None:
+    def guardar(self, path: Optional[Path] = None) -> bool:
+        """Escribe el estado. False si no se pudo (disco lleno, sin permisos…): quien gasta debe enterarse."""
         path = path or paths.STATE_FILE
         datos = {
             "exitos": self.exitos,
@@ -50,6 +51,8 @@ class EstadoMonitor:
             write_atomic(path, json.dumps(datos, indent=2, ensure_ascii=False))
         except Exception:
             logger.exception("No se pudo guardar el estado")
+            return False
+        return True
 
     @classmethod
     def cargar(cls, path: Optional[Path] = None) -> EstadoMonitor:

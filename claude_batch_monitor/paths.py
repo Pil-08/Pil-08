@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 APP_NAME = "ClaudeMonitor"
-APP_VERSION = "12.2.0"
+APP_VERSION = "12.3.0"
 __version__ = APP_VERSION
 
 # Variable de entorno para guardar los datos en otro sitio (modo portátil, Docker,
@@ -87,6 +89,32 @@ def _configurar_logger() -> logging.Logger:
 logger = _configurar_logger()
 
 
+# Esperas entre intentos de `replace`: en Windows falla un instante si un antivirus o un indexador tiene abierto el destino.
+_ESPERAS_AL_REEMPLAZAR = (0.05, 0.1, 0.2, 0.4)
+
+
+def _reemplazar(origen: Path, destino: Path) -> None:
+    for espera in (*_ESPERAS_AL_REEMPLAZAR, None):
+        try:
+            origen.replace(destino)
+            return
+        except PermissionError:
+            if espera is None:
+                raise
+            time.sleep(espera)
+
+
+_SUSTITUTOS_SUELTOS = re.compile("[\ud800-\udfff]")
+
+
+def _a_utf8(contenido: str) -> bytes:
+    """El texto como UTF-8 EXACTO (sin que Windows convierta `\\n` en `\\r\\n`) y sin fallar por un sustituto suelto."""
+    try:
+        return contenido.encode("utf-8")
+    except UnicodeEncodeError:
+        return _SUSTITUTOS_SUELTOS.sub("\ufffd", contenido).encode("utf-8")  # el mismo criterio que `limpiar_sustitutos`
+
+
 def write_atomic(path: Path, content: str) -> None:
     """Escribe `content` en `path` sin dejar nunca un fichero a medias.
 
@@ -99,8 +127,8 @@ def write_atomic(path: Path, content: str) -> None:
     marca = f"{os.getpid()}.{threading.get_ident()}"
     tmp = path.with_name(f"{path.name}.{marca}.tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+        tmp.write_bytes(_a_utf8(content))
+        _reemplazar(tmp, path)
     finally:
         if tmp.exists():
             try:

@@ -1,7 +1,7 @@
 name: release
 
 # Builds the desktop app for Windows, macOS and Linux.
-# Push a tag such as v12.2.0 (or run the workflow by hand) and the three builds appear as artifacts;
+# Push a tag such as v12.3.0 (or run the workflow by hand) and the three builds appear as artifacts;
 # for a tag, they are also attached to a DRAFT release that you review and publish yourself.
 on:
   push:

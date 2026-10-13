@@ -33,7 +33,7 @@ class Categoria(str, Enum):
     MODELO = "model_not_found"     # 404 sobre el modelo
     NO_ENCONTRADO = "not_found"
     DEMASIADO_GRANDE = "too_large"  # 413
-    SERVIDOR = "server"            # 5xx / 529 / error en mitad del stream: backoff
+    SERVIDOR = "server"            # 5xx / 529 / 408 / 409 / error en mitad del stream: backoff
     OTRO = "other"
 
 
@@ -107,8 +107,8 @@ def analizar_error(error: BaseException) -> ErrorApi:
         return devolver(Categoria.DEMASIADO_GRANDE)
     if status in (400, 422) or tipo == "invalid_request_error":
         return devolver(Categoria.PETICION)
-    if status >= 500 or tipo in ("overloaded_error", "api_error", "timeout_error"):
-        return devolver(Categoria.SERVIDOR)
+    if status >= 500 or status in (408, 409) or tipo in ("overloaded_error", "api_error", "timeout_error"):
+        return devolver(Categoria.SERVIDOR)  # 408 y 409 los devuelven pasarelas y proxies: se reintentan como el SDK
     return devolver(Categoria.OTRO)
 
 
@@ -137,4 +137,89 @@ def es_sin_conexion(error: BaseException) -> bool:
         for clase in type(causa).__mro__:
             if clase.__name__ == "ConnectError" and clase.__module__.split(".")[0] in ("httpx", "httpx2"):
                 return True
+    return False
+
+
+# ----------------------------------------------------------------------
+# Fallos de la conexión que el SDK no siempre envuelve
+# ----------------------------------------------------------------------
+# Con la respuesta en streaming, un corte a mitad del cuerpo o un tiempo agotado entre trozos salen tal cual
+# de la librería HTTP (no como `anthropic.APIConnectionError`). Se reconocen por NOMBRE de clase, como arriba.
+
+_LIBRERIAS_HTTP = ("httpx", "httpx2", "httpcore", "h11", "ssl", "socket", "builtins", "http", "urllib3")
+_CORTES = {
+    "RemoteProtocolError", "ReadError", "WriteError", "CloseError", "ProtocolError", "IncompleteRead",
+    "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError", "ChunkedEncodingError",
+}
+_TIMEOUTS = {"TimeoutException", "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutError", "timeout"}
+_TIMEOUTS_SIN_ENVIO = {"ConnectTimeout", "PoolTimeout", "WriteTimeout"}  # la petición no llegó a salir entera
+
+
+def _clases_de_la_cadena(error: BaseException) -> set[str]:
+    nombres: set[str] = set()
+    for causa in cadena_de_causas(error):
+        for clase in type(causa).__mro__:
+            if clase.__module__.split(".")[0] in _LIBRERIAS_HTTP:
+                nombres.add(clase.__name__)
+    return nombres
+
+
+class FlujoIncompleto(Exception):
+    """Una respuesta en streaming terminó sin entregar el mensaje entero.
+
+    `era_un_flujo` es False si lo recibido ni siquiera era un flujo de la API (un proxy, un portal cautivo…
+    contestó con otra cosa: el servidor no llegó a procesar nada) y True si empezó como tal y se cortó.
+    """
+
+    def __init__(self, era_un_flujo: bool, detalle: str = ""):
+        super().__init__(detalle or (
+            "El flujo de la respuesta se cortó antes de terminar." if era_un_flujo
+            else "La respuesta no era un flujo de la API."))
+        self.era_un_flujo = era_un_flujo
+
+
+def es_corte_de_conexion(error: BaseException) -> bool:
+    """La conexión se rompió a mitad de la petición o de la respuesta (el servidor pudo haberla procesado)."""
+    if any(isinstance(c, FlujoIncompleto) and c.era_un_flujo for c in cadena_de_causas(error)):
+        return True
+    return bool(_clases_de_la_cadena(error) & _CORTES)
+
+
+def es_timeout(error: BaseException) -> bool:
+    return bool(_clases_de_la_cadena(error) & _TIMEOUTS)
+
+
+def timeout_con_peticion_enviada(error: BaseException) -> bool:
+    """True si el tiempo se agotó DESPUÉS de enviar la petición: el servidor pudo procesarla y cobrarla.
+
+    Si no se puede saber, se supone que sí: para un tope de gasto, la duda cuenta como gasto.
+    """
+    return not (_clases_de_la_cadena(error) & _TIMEOUTS_SIN_ENVIO)
+
+
+def pudo_haberse_procesado(error: BaseException) -> bool:
+    """¿Pudo el servidor procesar la petición aunque no tengamos su respuesta?
+
+    Un 4xx (salvo 408 y 409) lo rechazó sin ejecutarla, y si no había conexión la petición ni salió.
+    Un 5xx, un tiempo agotado tras enviarla o un corte a mitad: no se sabe, y en un lote eso significa
+    que pudo crearse (y cobrarse) sin que nos enteráramos.
+    """
+    estado = getattr(error, "status_code", None)
+    if isinstance(estado, int):
+        return estado >= 500 or estado in (408, 409)
+    if es_sin_conexion(error) or es_respuesta_ilegible(error):
+        return False
+    if es_timeout(error):
+        return timeout_con_peticion_enviada(error)
+    return True
+
+
+def es_respuesta_ilegible(error: BaseException) -> bool:
+    """Llegó una respuesta completa pero no es lo que la API envía (una página de un proxy, un portal cautivo…)."""
+    for causa in cadena_de_causas(error):
+        nombre = type(causa).__name__
+        if nombre in ("JSONDecodeError", "APIResponseValidationError", "UnicodeDecodeError"):
+            return True
+        if isinstance(causa, FlujoIncompleto) and not causa.era_un_flujo:
+            return True
     return False

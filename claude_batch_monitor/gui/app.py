@@ -1137,10 +1137,31 @@ class AppAvanzada:
     def detener(self) -> None:
         if not (self._ocupado or self.ejecutor.activo):
             return
+        job = self.job
+        if job is not None and job.modo == "lote" and job.batch_id and self._confirmar(
+                "Detener el lote",
+                "Este lote ya está en los servidores de Anthropic y sigue procesándose aunque dejes de esperar "
+                "o cierres el programa; se cobrará al terminar.\n\n"
+                "¿Quieres cancelarlo también allí? Lo que ya se haya procesado se cobra; el resto, no.\n\n"
+                "Sí = cancelar el lote\n"
+                "No = solo dejar de esperar: podrás reanudar, y si luego quieres cancelarlo, pulsa Detener otra vez"):
+            if self.ejecutor.cancelar_lote(self._lote_cancelado):
+                self.var_estado.set("Estado: cancelando el lote en el servidor…")
+                self._log("Cancelación pedida al servidor. Lo ya procesado se cobra; el resto quedará como «cancelada».")
+                self._habilitar(self.boton_detener, False)
+                return
         self.ejecutor.detener()
         self.var_estado.set("Estado: cancelando (termino la petición en curso)…")
         self._log("Parada pedida. Se termina la petición en curso y no se envía ninguna más.")
         self._habilitar(self.boton_detener, False)
+
+    def _lote_cancelado(self, ok: bool) -> None:
+        if ok:
+            self._log("El servidor aceptó la cancelación. Pulsa «Reanudar» para recoger lo que se llegó a procesar.")
+        else:
+            self._log("No se pudo cancelar el lote en el servidor. Compruébalo en la consola de Anthropic.")
+            self._aviso("Cancelar el lote", "No se pudo cancelar el lote en el servidor.\n\n"
+                        "Compruébalo en la consola de Anthropic (Batches); puede seguir procesándose y cobrándose.")
 
     # ------------------------------------------------------------------
     # Pantalla durante el lote

@@ -206,10 +206,19 @@ class TestErroresRealesDelSdk:
         assert job.messages[0].error_type == "model_not_found"
 
     def test_timeout_real_se_reintenta_y_no_mata_el_lote(self):
-        s = Servidor([httpx.ReadTimeout("lento"), respuesta(cuerpo=mensaje_json())])
+        # El reintento tras un tiempo agotado va en streaming: sin un tiempo total que volver a agotar.
+        s = Servidor([httpx.ReadTimeout("lento"), respuesta(contenido=flujo(["Hola"]), tipo="text/event-stream")])
         m, job = motor_real(s)
         assert m.ejecutar(Callbacks()) == StopReason.COMPLETED
         assert job.messages[0].errores == 1
+        primera, segunda = (p[2] for p in s.peticiones)
+        assert not primera.get("stream") and segunda.get("stream") is True
+
+    def test_tras_un_timeout_el_peor_caso_cuenta_como_gasto_posible(self):
+        s = Servidor([httpx.ReadTimeout("lento"), respuesta(contenido=flujo(["Hola"]), tipo="text/event-stream")])
+        m, job = motor_real(s)
+        m.ejecutar(Callbacks())
+        assert m._incierto > 0  # la petición abandonada pudo cobrarse: se descuenta del tope que queda
 
     def test_sin_conexion_real_espera_y_reintenta(self):
         # Valida la suposición clave: el SDK encadena el ConnectError como __cause__.
@@ -277,6 +286,7 @@ class TestLoteReal:
         malo = {"custom_id": "m000002", "result": {"type": "errored", "error": {
             "type": "error", "error": {"type": "invalid_request_error", "message": "prompt demasiado largo"}}}}
         s = Servidor([
+            respuesta(200, {"data": [], "has_more": False, "first_id": None, "last_id": None}),  # list: el último lote de la cuenta
             respuesta(200, lote),                    # create
             respuesta(200, lote),                    # retrieve (en curso)
             respuesta(200, terminado),               # retrieve (terminado)
@@ -287,7 +297,9 @@ class TestLoteReal:
         m.intervalo_min = m.intervalo_max = 0.01
         assert m.ejecutar(Callbacks()) == StopReason.COMPLETED
 
-        metodo, ruta, cuerpo, _ = s.peticiones[0]
+        # Antes de enviar anota cuál es el último lote de la cuenta (para reconocer el propio si el envío queda sin respuesta).
+        assert s.peticiones[0][:2] == ("GET", "/v1/messages/batches")
+        metodo, ruta, cuerpo, _ = s.peticiones[1]
         assert (metodo, ruta) == ("POST", "/v1/messages/batches")
         assert [r["custom_id"] for r in cuerpo["requests"]] == ["m000001", "m000002", "m000003"]
         assert job.messages[0].status == STATUS_COMPLETED
@@ -296,6 +308,21 @@ class TestLoteReal:
         assert job.messages[1].status == "failed" and job.messages[1].error_type == "bad_request"
         assert "prompt demasiado largo" in job.messages[1].detalle
         assert job.batch_id == ""
+
+
+    def test_la_linea_base_sale_de_la_primera_pagina_de_la_lista_y_no_pide_mas(self):
+        previo = {"id": "msgbatch_previo", "type": "message_batch", "processing_status": "ended",
+                  "request_counts": {"processing": 0, "succeeded": 4, "errored": 0, "canceled": 0, "expired": 0},
+                  "created_at": "2026-10-04T09:00:00Z", "expires_at": "2026-10-05T09:00:00Z",
+                  "ended_at": "2026-10-04T09:30:00Z", "cancel_initiated_at": None, "archived_at": None, "results_url": None}
+        s = Servidor([
+            respuesta(200, {"data": [previo], "has_more": True, "first_id": "msgbatch_previo", "last_id": "msgbatch_previo"}),
+            httpx.ReadError("se cortó"),                       # el envío no recibe respuesta
+        ])
+        m, job = motor_real(s, n=3, motor=BatchEngine, modo="lote")
+        assert m.ejecutar(Callbacks()) == StopReason.NETWORK
+        assert Job.load(job.job_id).envio_incierto_tras == "msgbatch_previo"
+        assert len(s.peticiones) == 2, "para anotar el último lote basta la primera página: no debe recorrer la cuenta entera"
 
 
 class TestListaDeModelos:

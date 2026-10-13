@@ -49,6 +49,7 @@ SECCIONES: list[tuple[str, str]] = [
     ("estimator", "Estimar el coste antes de gastar"),
     ("notify", "Avisos: escritorio y Telegram"),
     ("platform_utils", "Sistema operativo: anti-suspensión y abrir carpetas"),
+    ("instancia_unica", "Una sola copia del programa gastando a la vez"),
     ("core.errors", "Motores: clasificar los errores de la API"),
     ("core.base", "Motores: lo común (contabilidad, esperas, guardado y parada)"),
     ("core.sequential", "Motor inmediato (Messages API)"),

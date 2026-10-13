@@ -165,6 +165,11 @@ TEXTOS: dict[str, dict[str, str]] = {
         "fatal_title": "No se pudo abrir el programa",
         "fatal_text": "Ha ocurrido un error inesperado y el programa se ha cerrado.",
         "fatal_log": "Los detalles están en este archivo (si pides ayuda, adjúntalo):\n{ruta}",
+        # una segunda copia del programa
+        "already_title": "Ya está abierto",
+        "already_text": "Ya hay otra copia de Claude Batch Monitor en marcha{proceso}.\n\n"
+                        "Dos copias a la vez se pisarían el gasto acumulado y el tope de gasto dejaría de proteger. "
+                        "Búscala en la barra de tareas o en la bandeja del sistema, o ciérrala antes de abrir esta.",
     },
     "en": {
         "app_title": "Claude · Question queue",
@@ -312,6 +317,12 @@ TEXTOS: dict[str, dict[str, str]] = {
         "fatal_title": "The program could not start",
         "fatal_text": "An unexpected error happened and the program has closed.",
         "fatal_log": "The details are in this file (attach it if you ask for help):\n{ruta}",
+        # a second copy of the program
+        "already_title": "Already open",
+        "already_text": "Another copy of Claude Batch Monitor is already running{proceso}.\n\n"
+                        "Two copies at once would overwrite each other's running spend total and the spend cap "
+                        "would stop protecting you. Look for it in the taskbar or the system tray, or close it "
+                        "before opening this one.",
     },
 }
 

@@ -11,6 +11,7 @@ from ..job import Job, JobMessage
 from ..paths import logger
 from ..ratelimit import observar_seguro
 from .base import Callbacks, Contadores, Decision, EngineBase, StopReason, build_request_params
+from .errors import FlujoIncompleto, es_timeout, timeout_con_peticion_enviada
 
 
 class SequentialEngine(EngineBase):
@@ -128,6 +129,8 @@ class SequentialEngine(EngineBase):
                 respuesta, ms = self._llamar_api(msg, cb)
             except Exception as error:
                 self._liberar(coste_max)
+                if es_timeout(error) and timeout_con_peticion_enviada(error):
+                    self._anotar_incierto(coste_max, msg)
                 decision = self.manejar_error(error, cb, cont, msg)
                 if decision is Decision.PARAR:
                     return False
@@ -135,6 +138,26 @@ class SequentialEngine(EngineBase):
                     return True
                 continue
             return self.registrar_respuesta(msg, respuesta, ciclo, cb, ms, reserva=coste_max)
+
+    @staticmethod
+    def _mensaje_final(stream: Any) -> Any:
+        """El mensaje entero de un streaming, o `FlujoIncompleto` si lo recibido no llegó a serlo.
+
+        Sin esto, un flujo vacío (un proxy que contesta con una página, una conexión cerrada antes de empezar) salía
+        como un `AssertionError` del SDK y se tomaba por un fallo inesperado que paraba todo; y uno cortado a mitad
+        podía darse por bueno con la respuesta a medias.
+        """
+        try:
+            respuesta = stream.get_final_message()
+        except AssertionError as error:
+            try:
+                era_un_flujo = "text/event-stream" in str(stream.response.headers.get("content-type", ""))
+            except Exception:
+                era_un_flujo = True  # si no se puede saber, se supone lo peor: pudo procesarse
+            raise FlujoIncompleto(era_un_flujo) from error
+        if getattr(respuesta, "stop_reason", "") is None:
+            raise FlujoIncompleto(True)  # empezó y no llegó el final del mensaje
+        return respuesta
 
     def _llamar_api(self, msg: JobMessage, cb: Callbacks) -> tuple[Any, int]:
         """Una llamada a la API. Devuelve (respuesta, latencia en ms)."""
@@ -146,12 +169,12 @@ class SequentialEngine(EngineBase):
             extra["extra_body"] = {"output_config": params.pop("output_config")}
 
         inicio = time.monotonic()
-        if self.config.usa_streaming:
+        if self.config.usa_streaming or msg.id in self._con_timeout:
             with self.client.messages.stream(**params, **extra) as stream:
                 observar_seguro(self.rate_limits, stream)
                 for trozo in stream.text_stream:
                     cb.emit("delta", msg.id, trozo)
-                respuesta = stream.get_final_message()
+                respuesta = self._mensaje_final(stream)
         else:
             # Respuesta cruda: las cabeceras de cuota se leen en TODAS las respuestas,
             # no solo al recibir un 429, para frenar antes de chocar con el límite.

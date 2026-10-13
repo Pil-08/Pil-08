@@ -205,6 +205,6 @@ class TestNoEsconde:
             origen = getattr(spec, "origin", None) or ""
             return spec is not None and "site-packages" not in origen and "dist-packages" not in origen
 
-        # `tkinter` (opcional en algunos Python) y `winreg` (solo Windows) también son de la biblioteca estándar
-        externas = {n for n in importados if not es_estandar(n) and n not in ("tkinter", "winreg")}
+        # `tkinter` (opcional en algunos Python) y `winreg` / `msvcrt` (solo Windows) también son de la biblioteca estándar
+        externas = {n for n in importados if not es_estandar(n) and n not in ("tkinter", "winreg", "msvcrt")}
         assert externas == declaradas, externas ^ declaradas

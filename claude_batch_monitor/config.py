@@ -48,7 +48,7 @@ def a_decimal(valor: Any, defecto: Decimal) -> Decimal:
 def _int(valor: Any, defecto: int, minimo: int, maximo: int) -> int:
     try:
         return max(minimo, min(maximo, int(valor)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (OverflowError: `Infinity`, que Python sí lee en un JSON)
         return defecto
 
 
@@ -212,7 +212,7 @@ class Configuracion:
             retencion_dias=_int(data.get("retencion_dias"), 30, 0, 3650),
             interfaz=interfaz if interfaz in INTERFACES else base.interfaz,
             mostrar_formato=bool(data.get("mostrar_formato", True)),
-            idioma=texto("idioma", "").strip().lower()[:5],
+            idioma=texto("idioma", "").strip().lower()[:5].strip(),
             tema=tema if tema in TEMAS else base.tema,
         )
 

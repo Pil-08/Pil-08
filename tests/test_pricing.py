@@ -163,6 +163,18 @@ class TestCoste:
         assert coste_uso(None, p) == 0
         assert leer_consumo(object()) == Consumo()
 
+    @pytest.mark.parametrize("valor,esperado", [
+        ("7", 7), (" 12 ", 12), ("007", 7), ("abc", 0), ("-3", 0), ("1.5", 0), ("", 0), (None, 0), (True, 0), ([], 0),
+        ("²", 0), ("٣", 3),          # «²» pasa por isdigit() pero no es un número; «٣» sí (un dígito arábigo-índico)
+        (-5, 0), (3.9, 3), (float("nan"), 0), (float("inf"), 0), (float("-inf"), 0),
+        (D("8"), 8), (D("NaN"), 0), (D("Infinity"), 0), (10**15, 10**15),
+    ])
+    def test_los_contadores_raros_se_leen_sin_reventar(self, valor, esperado):
+        class Uso:
+            output_tokens = valor
+
+        assert leer_consumo(Uso()).salida == esperado
+
     def test_coste_maximo_es_entrada_mas_max_tokens_de_salida(self):
         p = resolver_precios("claude-haiku-4-5")  # 1 / 5
         assert coste_maximo(1000, 16_000, p) == D("0.081")

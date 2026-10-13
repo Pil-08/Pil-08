@@ -205,7 +205,35 @@ class TestEnviar:
         app._seleccionar(1)
         app.on_delta(1, "Hola ")
         app.on_delta(1, "mundo")
-        assert app.respuesta.get("1.0", "end").strip() == "Hola mundo"
+        assert bombear(raiz, lambda: app.respuesta.get("1.0", "end").strip() == "Hola mundo")
+
+    def test_los_trozos_que_llegan_juntos_se_pintan_de_una_vez(self, raiz, con_clave):
+        """Repintar con cada trozo dejaba la ventana sin responder con una respuesta larga sin saltos de línea."""
+        app = crear(raiz)
+        app.cola.pausar()
+        app.cola.agregar("a")
+        assert bombear(raiz, lambda: filas(app))
+        app._seleccionar(1)
+        pintados = []
+        original = app._escribir_respuesta
+        app._escribir_respuesta = lambda texto, **k: (pintados.append(texto), original(texto, **k))[1]
+        for i in range(500):
+            app.on_delta(1, f"trozo{i} ")
+        assert bombear(raiz, lambda: pintados and pintados[-1].endswith("trozo499 "))
+        assert len(pintados) <= 5                      # y no 500
+        assert app.respuesta.get("1.0", "end").split() == [f"trozo{i}" for i in range(500)]
+
+    def test_si_la_respuesta_termina_antes_del_repintado_no_se_pisa_con_el_texto_parcial(self, raiz, con_clave):
+        app = crear(raiz, guion=[FakeResponse("La respuesta definitiva")])
+        escribir(app, "q")
+        app.enviar()
+        assert bombear(raiz, lambda: filas(app) and filas(app)[0][2] == t("st_done"))
+        assert "La respuesta definitiva" in app.respuesta.get("1.0", "end")
+        app.on_delta(1, "trozo tardío")                 # un repintado queda programado…
+        app.on_orden(app.cola.job.mensaje(1))            # …y la respuesta definitiva llega antes de que se ejecute
+        bombear(raiz, timeout=0.4)
+        texto = app.respuesta.get("1.0", "end")
+        assert "La respuesta definitiva" in texto and "trozo tardío" not in texto
 
 
 class TestSeleccion:
@@ -317,7 +345,7 @@ class TestRespuestasConFormato:
         assert bombear(raiz, lambda: filas(app), timeout=2)
         app._seleccionar(1)
         app.on_delta(1, "**a medias")
-        assert app.respuesta.get("1.0", "end").strip() == "**a medias"
+        assert bombear(raiz, lambda: app.respuesta.get("1.0", "end").strip() == "**a medias")
         assert not app.respuesta.tag_ranges("negrita")
 
     def test_copiar_da_el_texto_original_no_el_formateado(self, raiz, con_clave):

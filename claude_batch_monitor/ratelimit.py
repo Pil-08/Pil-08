@@ -11,6 +11,7 @@ evita que todos los hilos choquen a la vez contra el muro.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
 import time
@@ -41,9 +42,11 @@ def parse_reset(valor: str) -> Optional[float]:
         return None
     if len(valor) >= 2 and valor[-1].lower() in _UNIDADES:
         try:
-            return float(valor[:-1]) * _UNIDADES[valor[-1].lower()]
+            segundos = float(valor[:-1]) * _UNIDADES[valor[-1].lower()]
         except ValueError:
-            pass
+            segundos = None
+        if segundos is not None:
+            return segundos if math.isfinite(segundos) else None  # «nan s», «1e999h»…: no es un tiempo
     try:
         # Python < 3.11 solo admite 3 o 6 decimales de segundo y no entiende la Z.
         texto = _FRACCION.sub(lambda m: (m.group(1) + "000000")[:7], valor.replace("Z", "+00:00"))

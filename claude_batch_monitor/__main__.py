@@ -12,7 +12,7 @@ from .platform_utils import comando_para_ejecutar, nombre_de_python
 # Con cualquiera de estas opciones se entiende que se quiere la terminal, aunque
 # se olvide `--cli`: abrir una ventana en un servidor sin pantalla no ayuda a nadie.
 _OPCIONES_DE_TERMINAL = {
-    "--cli", "--mensaje", "--reanudar", "--listar", "--dry-run", "--version", "--json", "--help", "-h",
+    "--cli", "--mensaje", "--reanudar", "--cancelar-lote", "--listar", "--dry-run", "--version", "--json", "--help", "-h",
 }
 
 

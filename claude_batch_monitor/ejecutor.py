@@ -89,6 +89,30 @@ class EjecutorLote:
         if motor is not None:
             motor.detener()
 
+    def cancelar_lote(self, al_terminar: Optional[Callable[[bool], None]] = None) -> bool:
+        """Para el seguimiento y cancela en el servidor el lote en curso (en segundo plano, sin bloquear a quien llama).
+
+        `al_terminar(ok)` se avisa por `publicar` cuando el servidor ha contestado. False si no hay un lote que cancelar.
+        Primero se para el motor (siempre el mismo desenlace: el lote queda `canceling` y «Reanudar» recoge lo que quede);
+        el motor cierra su cliente al terminar, y `cancelar_lote` del motor lo sabe y usa uno propio si hace falta.
+        """
+        motor = self._motor
+        if motor is None or not hasattr(motor, "cancelar_lote") or not getattr(motor.job, "batch_id", ""):
+            return False
+        motor.detener()
+
+        def trabajo() -> None:
+            ok = False
+            try:
+                ok = bool(motor.cancelar_lote())
+            except Exception:
+                logger.exception("Fallo al cancelar el lote")
+            if al_terminar is not None:
+                self._entregar(al_terminar, ok)
+
+        threading.Thread(target=trabajo, daemon=True, name="cancelar-lote").start()
+        return True
+
     def esperar(self, timeout: Optional[float] = None) -> bool:
         """Espera a que termine el hilo (para el cierre ordenado y las pruebas)."""
         hilo = self._hilo

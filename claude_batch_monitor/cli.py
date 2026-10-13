@@ -7,13 +7,14 @@ Códigos de salida (para encadenar con `&&` o `case $?`):
     2  detenido por el tope de gasto
     3  sin saldo, o límite de gasto de la cuenta de Anthropic
     4  incompleto (hora límite o cancelado con Ctrl+C)
-    5  uso incorrecto (argumentos, fichero, configuración)
+    5  uso incorrecto (argumentos, fichero, configuración) o ya hay otra copia del programa en marcha
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -28,6 +29,7 @@ from .core.sequential import SequentialEngine
 from .estimator import estimar
 from .export import FORMATOS, ErrorDeExportacion, exportar
 from .inputs import ErrorDeEntrada, aplicar_plantilla, leer_ordenes
+from .instancia_unica import BloqueoDeInstancia, aviso_de_otra_copia
 from .job import Job, JobMessage, listar_jobs, purgar_jobs_antiguos
 from .parsing import DEFAULT_SEPARATOR, split_messages
 from .paths import logger
@@ -93,6 +95,8 @@ def construir_parser() -> argparse.ArgumentParser:
     e.add_argument("--separador", default=DEFAULT_SEPARATOR, help="Separador de órdenes en texto plano")
     e.add_argument("--reanudar", metavar="JOB_ID", help="Continúa un lote existente")
     e.add_argument("--listar", action="store_true", help="Lista los lotes guardados y sale")
+    e.add_argument("--cancelar-lote", metavar="JOB_ID", dest="cancelar_lote",
+                   help="Cancela en el servidor el lote en curso (lo ya procesado se cobra) y sale")
 
     m = p.add_argument_group("modelo")
     m.add_argument("--modelo", help=f"Por defecto {DEFAULT_MODEL}; al reanudar, el del lote")
@@ -148,16 +152,40 @@ class _Salida:
         print(f"ERROR: {texto}", file=sys.stderr, flush=True)
 
 
+def _como_utf8(texto: str) -> str:
+    """El texto de un argumento tal como lo tecleó quien lo escribió.
+
+    Python lee los argumentos con la codificación del sistema. Si es ASCII (una terminal con LANG=C y sin el modo UTF-8
+    de Python), cada carácter no ASCII llega como «sustitutos» y se guardaría como `��`. Aquí se recuperan los bytes
+    originales y se leen como UTF-8. Solo para TEXTOS: una ruta de archivo tiene que quedarse tal como llegó.
+    """
+    if not any("\udc80" <= c <= "\udcff" for c in texto):
+        return texto
+    try:
+        return os.fsencode(texto).decode("utf-8")
+    except UnicodeDecodeError:
+        return texto
+
+
+def _es_un_archivo(valor: str) -> bool:
+    """¿Es `valor` la ruta de un archivo que existe? Un texto largo (una pregunta) no es una ruta y no debe fallar."""
+    if not valor or "\n" in valor or "\x00" in valor:
+        return False
+    try:
+        return Path(valor).is_file()
+    except (OSError, ValueError):  # p. ej. «File name too long» con una pregunta de más de 255 caracteres
+        return False
+
+
 def _texto_o_fichero(valor: Optional[str]) -> str:
     if not valor:
         return ""
-    ruta = Path(valor)
     try:
-        if ruta.is_file():
-            return ruta.read_text(encoding="utf-8-sig").strip()
+        if _es_un_archivo(valor):
+            return Path(valor).read_text(encoding="utf-8-sig").strip()
     except (OSError, UnicodeDecodeError):
         pass
-    return valor
+    return _como_utf8(valor)
 
 
 def _decimal_de_opcion(valor: Optional[str], nombre: str) -> Optional[Decimal]:
@@ -174,17 +202,18 @@ def _decimal_de_opcion(valor: Optional[str], nombre: str) -> Optional[Decimal]:
 
 def _ordenes_desde_args(args: argparse.Namespace) -> list[str]:
     origen = args.mensaje
-    if Path(origen).is_file():
+    plantilla = _como_utf8(args.plantilla or "")
+    if _es_un_archivo(origen):
         return leer_ordenes(
             origen, campo=args.campo, separador=args.separador,
-            plantilla=args.plantilla or "", limite=args.limit,
+            plantilla=plantilla, limite=args.limit,
         )
-    ordenes = split_messages(origen, args.separador)
+    ordenes = split_messages(_como_utf8(origen), _como_utf8(args.separador))
     if not ordenes:
         raise ErrorDeEntrada("No se detectó ninguna orden en --mensaje.")
     if args.limit and args.limit > 0:
         ordenes = ordenes[: args.limit]
-    return [aplicar_plantilla(args.plantilla or "", o) for o in ordenes]
+    return [aplicar_plantilla(plantilla, o) for o in ordenes]
 
 
 def _configuracion(args: argparse.Namespace, job: Optional[Job]) -> Configuracion:
@@ -273,6 +302,36 @@ def _cliente_para_conteo() -> Optional[Any]:
         return None
 
 
+def _cancelar_lote(args: argparse.Namespace, salida: _Salida) -> int:
+    """`--cancelar-lote`: pide al servidor que cancele el lote en curso de un trabajo guardado."""
+    job = Job.load(args.cancelar_lote)
+    if job is None:
+        salida.error(f"No existe el lote '{args.cancelar_lote}'. Usa --listar para ver los guardados.")
+        return EXIT_USO
+    if not job.batch_id:
+        salida.error(
+            f"El lote {job.job_id} no tiene nada en curso en el servidor de Anthropic "
+            "(ya terminó, o no se envió en modo lote)."
+        )
+        return EXIT_USO
+    try:
+        config = _configuracion(args, job)
+    except (ErrorDeEntrada, ErrorDeExportacion) as e:
+        salida.error(str(e))
+        return EXIT_USO
+    if BatchEngine(config, job).cancelar_lote():
+        salida.info(
+            f"Cancelación pedida para el lote {job.batch_id}. Lo que ya se hubiera procesado se cobra; "
+            f"el resto queda como «cancelada». Para recoger el resultado: --reanudar {job.job_id}"
+        )
+        return EXIT_OK
+    salida.error(
+        f"No se pudo cancelar el lote {job.batch_id} (mira el registro: {paths.LOG_FILE}). "
+        "Comprueba su estado en la consola de Anthropic."
+    )
+    return EXIT_FALLO
+
+
 def main_cli(argv: Optional[list[str]] = None) -> int:
     forzar_utf8_en_salida()
     parser = construir_parser()
@@ -298,6 +357,9 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
                 print(f"{d['job_id']}  {d['created_at'][:16]}  {d['modelo']:<22} {d['modo']:<9} "
                       f"{d['completadas']}/{d['total']}  {formatear_usd(d['coste_usd'])}{marca}")
         return EXIT_OK
+
+    if args.cancelar_lote:
+        return _cancelar_lote(args, salida)
 
     if not args.mensaje and not args.reanudar:
         parser.print_usage(sys.stderr)
@@ -363,6 +425,20 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
         salida.info("No queda nada pendiente en ese lote.")
         # Aun así se exporta lo que haya, y se sale como completado.
 
+    # Lo que viene gasta dinero y toca el gasto acumulado: que no lo haga a la vez otra copia del programa.
+    bloqueo = BloqueoDeInstancia()
+    if not bloqueo.adquirir():
+        salida.error(aviso_de_otra_copia(bloqueo.dueno))
+        return EXIT_USO
+    try:
+        return _ejecutar_lote(args, salida, config, job, textos, est)
+    finally:
+        bloqueo.liberar()
+
+
+def _ejecutar_lote(
+    args: argparse.Namespace, salida: _Salida, config: Configuracion, job: Optional[Job], textos: list[str], est: Any
+) -> int:
     if job is None:
         job = Job.crear(textos, config)
         job.save()
@@ -385,6 +461,11 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
             razon = motor.ejecutar(cb) if job.hay_trabajo() else StopReason.COMPLETED
     except KeyboardInterrupt:
         salida.info("\nDetenido por el usuario. El lote queda guardado.")
+        if job.modo == "lote" and job.batch_id:
+            salida.info(
+                "El lote sigue procesándose en el servidor y se cobrará al terminar. "
+                f"Para cancelarlo: --cancelar-lote {job.job_id}"
+            )
         motor.detener()
         razon = StopReason.STOPPED
 

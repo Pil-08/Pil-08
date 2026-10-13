@@ -248,3 +248,64 @@ def test_el_ejecutor_no_guarda_el_motor_tras_terminar():
     assert ex.motor is None
     time.sleep(0)  # el hilo ya terminó; nada que esperar
     assert base.StopReason.COMPLETED.value == "completed"
+
+
+class TestCancelarElLote:
+    """Se para el motor al momento y se cancela en segundo plano (el motor ya sabe usar un cliente propio si el suyo se cerró)."""
+
+    class MotorFalso:
+        def __init__(self, job, orden, ok=True):
+            self.job, self.orden, self.ok, self.notificaciones = job, orden, ok, False
+
+        def cancelar_lote(self):
+            self.orden.append("cancelar")
+            return self.ok
+
+        def detener(self):
+            self.orden.append("detener")
+
+    def _ejecutor_con(self, motor):
+        ej = EjecutorLote()
+        ej._motor = motor
+        return ej
+
+    def test_se_para_al_momento_y_se_cancela_en_segundo_plano_avisando_del_resultado(self):
+        job = Job.crear(["a"], cfg(modo="lote"))
+        job.batch_id = "msgbatch_x"
+        orden, avisos = [], []
+        ej = self._ejecutor_con(self.MotorFalso(job, orden))
+        assert ej.cancelar_lote(avisos.append) is True
+        hasta(lambda: avisos)
+        assert orden == ["detener", "cancelar"] and avisos == [True]
+
+    def test_si_el_servidor_no_puede_se_dice(self):
+        job = Job.crear(["a"], cfg(modo="lote"))
+        job.batch_id = "msgbatch_x"
+        orden, avisos = [], []
+        ej = self._ejecutor_con(self.MotorFalso(job, orden, ok=False))
+        ej.cancelar_lote(avisos.append)
+        hasta(lambda: avisos)
+        assert orden == ["detener", "cancelar"] and avisos == [False]
+
+    def test_si_la_cancelacion_revienta_se_dice_que_no_pudo(self):
+        job = Job.crear(["a"], cfg(modo="lote"))
+        job.batch_id = "msgbatch_x"
+        orden, avisos = [], []
+        motor = self.MotorFalso(job, orden)
+
+        def revienta():
+            orden.append("cancelar")
+            raise RuntimeError("boom")
+
+        motor.cancelar_lote = revienta
+        self._ejecutor_con(motor).cancelar_lote(avisos.append)
+        hasta(lambda: avisos)
+        assert orden == ["detener", "cancelar"] and avisos == [False]
+
+    def test_sin_lote_en_el_servidor_no_hace_nada(self):
+        job = Job.crear(["a"], cfg(modo="lote"))
+        orden = []
+        assert self._ejecutor_con(self.MotorFalso(job, orden)).cancelar_lote() is False and orden == []
+
+    def test_sin_motor_en_marcha_no_hace_nada(self):
+        assert EjecutorLote().cancelar_lote() is False

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from ..config import ConfigManager
+from ..instancia_unica import BloqueoDeInstancia
 from ..platform_utils import comando_para_ejecutar
+
+EXIT_YA_ABIERTO = 5  # el mismo código de «uso incorrecto» de la terminal
 
 
 def _activar_dpi_alto() -> None:
@@ -33,6 +36,25 @@ def modo_pedido(argv: list[str]) -> Optional[str]:
     return None
 
 
+def _avisar_de_otra_copia(dueno: str) -> None:
+    """Dice, con una ventana (no todo el mundo ve la consola), que ya hay otra copia abierta."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    from .i18n import fijar_idioma, t
+
+    fijar_idioma(ConfigManager.cargar().idioma)
+    texto = t("already_text", proceso=f" (PID {dueno})" if dueno else "")
+    print(texto, file=sys.stderr)
+    try:
+        raiz = tk.Tk()
+        raiz.withdraw()
+        messagebox.showwarning(t("already_title"), texto, parent=raiz)
+        raiz.destroy()
+    except tk.TclError:
+        pass  # sin pantalla: ya se imprimió
+
+
 def abrir_interfaz(argv: Optional[list[str]] = None) -> int:
     """Abre la interfaz y alterna entre los dos modos mientras la persona lo pida.
 
@@ -41,6 +63,17 @@ def abrir_interfaz(argv: Optional[list[str]] = None) -> int:
     """
     import tkinter as tk
 
+    bloqueo = BloqueoDeInstancia()
+    if not bloqueo.adquirir():
+        _avisar_de_otra_copia(bloqueo.dueno)
+        return EXIT_YA_ABIERTO
+    try:
+        return _abrir(argv, tk)
+    finally:
+        bloqueo.liberar()
+
+
+def _abrir(argv: Optional[list[str]], tk: Any) -> int:
     modo = modo_pedido(list(argv or [])) or ConfigManager.cargar().interfaz
     _activar_dpi_alto()
     try:

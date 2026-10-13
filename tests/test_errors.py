@@ -120,7 +120,9 @@ class TestResto:
             (504, {"type": "timeout_error", "message": "timeout"}, Categoria.SERVIDOR),
             (529, {"type": "overloaded_error", "message": "Overloaded"}, Categoria.SERVIDOR),
             (200, {"type": "overloaded_error", "message": "Overloaded"}, Categoria.SERVIDOR),
-            (409, None, Categoria.OTRO),
+            (408, None, Categoria.SERVIDOR),   # el propio SDK reintenta 408 y 409: son transitorios
+            (409, None, Categoria.SERVIDOR),
+            (418, None, Categoria.OTRO),
         ],
     )
     def test_categorias(self, status, cuerpo, esperada):

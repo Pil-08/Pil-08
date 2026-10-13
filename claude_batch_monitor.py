@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Batch Monitor 12.2.0: una cola de preguntas para Claude con tope de gasto.
+"""Claude Batch Monitor 12.3.0: una cola de preguntas para Claude con tope de gasto.
 
 ESTE ARCHIVO ES EL PROGRAMA COMPLETO. No hace falta nada más que Python.
 
@@ -54,6 +54,7 @@ import io
 import json
 import locale
 import logging
+import math
 import os
 import platform
 import queue
@@ -106,41 +107,42 @@ except ImportError:  # un Python sin tkinter: la terminal funciona y el arranque
 # ============================================================================
 # ÍNDICE   (cada sección empieza con un título numerado: busca su número)
 # ============================================================================
-#    1. Carpetas de datos, registro de eventos y escritura atómica       línea   146
-#    2. Trocear el texto del usuario en órdenes                          línea   252
-#    3. Modelos, precios y coste                                         línea   275
-#    4. Configuración                                                    línea   590
-#    5. Estado guardado y almacén seguro de secretos                     línea   824
-#    6. El lote: órdenes, estado de cada una y guardado en disco         línea   949
-#    7. Leer órdenes desde texto, CSV, TSV y JSONL                       línea  1321
-#    8. Respetar los límites de la API                                   línea  1515
-#    9. Exportar resultados                                              línea  1675
-#   10. Estimar el coste antes de gastar                                 línea  1829
-#   11. Avisos: escritorio y Telegram                                    línea  1935
-#   12. Sistema operativo: anti-suspensión y abrir carpetas              línea  2052
-#   13. Motores: clasificar los errores de la API                        línea  2194
-#   14. Motores: lo común (contabilidad, esperas, guardado y parada)     línea  2333
-#   15. Motor inmediato (Messages API)                                   línea  3094
-#   16. Motor de lote (Message Batches API, mitad de precio)             línea  3263
-#   17. Clave de API y elección de modelo                                línea  3558
-#   18. La cola del modo simple                                          línea  3673
-#   19. Ejecutar un lote en segundo plano (modo avanzado)                línea  3972
-#   20. Terminal (--cli)                                                 línea  4096
-#   21. Interfaz: textos en español e inglés                             línea  4488
-#   22. Interfaz: colores, tipografías y estilos                         línea  4868
-#   23. Interfaz: el icono, dibujado con código                          línea  5063
-#   24. Interfaz: ventanas y paneles comunes                             línea  5142
-#   25. Interfaz: puente entre hilos                                     línea  5272
-#   26. Interfaz: icono en la bandeja del sistema (opcional)             línea  5349
-#   27. Interfaz: respuestas con formato                                 línea  5425
-#   28. Interfaz avanzada: ventanas secundarias                          línea  5678
-#   29. Modo simple                                                      línea  5894
-#   30. Modo avanzado                                                    línea  6939
-#   31. Abrir la interfaz                                                línea  8405
-#   32. Instalar la librería de Anthropic si falta                       línea  8468
-#   33. Arranque                                                         línea  8790
+#    1. Carpetas de datos, registro de eventos y escritura atómica       línea   148
+#    2. Trocear el texto del usuario en órdenes                          línea   280
+#    3. Modelos, precios y coste                                         línea   315
+#    4. Configuración                                                    línea   637
+#    5. Estado guardado y almacén seguro de secretos                     línea   871
+#    6. El lote: órdenes, estado de cada una y guardado en disco         línea   999
+#    7. Leer órdenes desde texto, CSV, TSV y JSONL                       línea  1397
+#    8. Respetar los límites de la API                                   línea  1593
+#    9. Exportar resultados                                              línea  1755
+#   10. Estimar el coste antes de gastar                                 línea  1930
+#   11. Avisos: escritorio y Telegram                                    línea  2036
+#   12. Sistema operativo: anti-suspensión y abrir carpetas              línea  2153
+#   13. Una sola copia del programa gastando a la vez                    línea  2295
+#   14. Motores: clasificar los errores de la API                        línea  2435
+#   15. Motores: lo común (contabilidad, esperas, guardado y parada)     línea  2659
+#   16. Motor inmediato (Messages API)                                   línea  3569
+#   17. Motor de lote (Message Batches API, mitad de precio)             línea  3760
+#   18. Clave de API y elección de modelo                                línea  4273
+#   19. La cola del modo simple                                          línea  4388
+#   20. Ejecutar un lote en segundo plano (modo avanzado)                línea  4687
+#   21. Terminal (--cli)                                                 línea  4835
+#   22. Interfaz: textos en español e inglés                             línea  5306
+#   23. Interfaz: colores, tipografías y estilos                         línea  5697
+#   24. Interfaz: el icono, dibujado con código                          línea  5892
+#   25. Interfaz: ventanas y paneles comunes                             línea  5971
+#   26. Interfaz: puente entre hilos                                     línea  6101
+#   27. Interfaz: icono en la bandeja del sistema (opcional)             línea  6178
+#   28. Interfaz: respuestas con formato                                 línea  6254
+#   29. Interfaz avanzada: ventanas secundarias                          línea  6507
+#   30. Modo simple                                                      línea  6723
+#   31. Modo avanzado                                                    línea  7783
+#   32. Abrir la interfaz                                                línea  9270
+#   33. Instalar la librería de Anthropic si falta                       línea  9364
+#   34. Arranque                                                         línea  9686
 # ============================================================================
-# Para leerlo en el orden en que se ejecuta: 33 (arranque), 29 (modo simple), 15 (motor inmediato).
+# Para leerlo en el orden en que se ejecuta: 34 (arranque), 30 (modo simple), 16 (motor inmediato).
 
 # ============================================================================
 # 1. Carpetas de datos, registro de eventos y escritura atómica
@@ -159,7 +161,7 @@ except ImportError:  # un Python sin tkinter: la terminal funciona y el arranque
 
 
 APP_NAME = "ClaudeMonitor"
-APP_VERSION = "12.2.0"
+APP_VERSION = "12.3.0"
 __version__ = APP_VERSION
 
 # Variable de entorno para guardar los datos en otro sitio (modo portátil, Docker,
@@ -226,6 +228,32 @@ def _configurar_logger() -> logging.Logger:
 logger = _configurar_logger()
 
 
+# Esperas entre intentos de `replace`: en Windows falla un instante si un antivirus o un indexador tiene abierto el destino.
+_ESPERAS_AL_REEMPLAZAR = (0.05, 0.1, 0.2, 0.4)
+
+
+def _reemplazar(origen: Path, destino: Path) -> None:
+    for espera in (*_ESPERAS_AL_REEMPLAZAR, None):
+        try:
+            origen.replace(destino)
+            return
+        except PermissionError:
+            if espera is None:
+                raise
+            time.sleep(espera)
+
+
+_SUSTITUTOS_SUELTOS = re.compile("[\ud800-\udfff]")
+
+
+def _a_utf8(contenido: str) -> bytes:
+    """El texto como UTF-8 EXACTO (sin que Windows convierta `\\n` en `\\r\\n`) y sin fallar por un sustituto suelto."""
+    try:
+        return contenido.encode("utf-8")
+    except UnicodeEncodeError:
+        return _SUSTITUTOS_SUELTOS.sub("\ufffd", contenido).encode("utf-8")  # el mismo criterio que `limpiar_sustitutos`
+
+
 def write_atomic(path: Path, content: str) -> None:
     """Escribe `content` en `path` sin dejar nunca un fichero a medias.
 
@@ -238,8 +266,8 @@ def write_atomic(path: Path, content: str) -> None:
     marca = f"{os.getpid()}.{threading.get_ident()}"
     tmp = path.with_name(f"{path.name}.{marca}.tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+        tmp.write_bytes(_a_utf8(content))
+        _reemplazar(tmp, path)
     finally:
         if tmp.exists():
             try:
@@ -258,6 +286,17 @@ def write_atomic(path: Path, content: str) -> None:
 
 DEFAULT_SEPARATOR = "---"
 
+_SUSTITUTOS = re.compile("[\ud800-\udfff]")
+
+
+def limpiar_sustitutos(texto: str) -> str:
+    """Cambia los «sustitutos» sueltos de UTF-16 por U+FFFD.
+
+    Un emoji partido por la mitad (de un pegado raro, de un texto cortado en mal sitio) es una cadena que Python
+    acepta pero que NO se puede escribir como UTF-8: sin esto, guardar la pregunta o la respuesta fallaba.
+    """
+    return _SUSTITUTOS.sub("\ufffd", texto) if texto else texto
+
 
 def split_messages(text: str, separator: str = DEFAULT_SEPARATOR) -> list[str]:
     """Parte el texto en bloques por una LÍNEA que sea exactamente el separador.
@@ -268,6 +307,7 @@ def split_messages(text: str, separator: str = DEFAULT_SEPARATOR) -> list[str]:
     """
     sep = (separator or "").strip() or DEFAULT_SEPARATOR
     pattern = rf"(?m)^[ \t]*{re.escape(sep)}[ \t]*$"
+    text = text.replace("\r\n", "\n").replace("\r", "\n")  # `$` solo reconoce `\n`: sin esto, un texto de Windows no se parte
     return [m.strip() for m in re.split(pattern, text) if m.strip()]
 
 
@@ -478,7 +518,14 @@ def soporta_esfuerzo(modelo: str, nivel: Optional[str] = None) -> Optional[bool]
 def _contador(obj: Any, nombre: str) -> int:
     """Lee un contador de tokens de un objeto `usage` sin fiarse de que exista."""
     valor = getattr(obj, nombre, 0)
+    if isinstance(valor, str):
+        try:
+            valor = int(valor.strip())  # un intermediario que convierte los números en texto: se cuenta igual, no como cero
+        except ValueError:
+            return 0
     if isinstance(valor, bool) or not isinstance(valor, (int, float, Decimal)):
+        return 0
+    if (isinstance(valor, float) and not math.isfinite(valor)) or (isinstance(valor, Decimal) and not valor.is_finite()):
         return 0
     return max(0, int(valor))
 
@@ -621,7 +668,7 @@ def a_decimal(valor: Any, defecto: Decimal) -> Decimal:
 def _int(valor: Any, defecto: int, minimo: int, maximo: int) -> int:
     try:
         return max(minimo, min(maximo, int(valor)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (OverflowError: `Infinity`, que Python sí lee en un JSON)
         return defecto
 
 
@@ -785,7 +832,7 @@ class Configuracion:
             retencion_dias=_int(data.get("retencion_dias"), 30, 0, 3650),
             interfaz=interfaz if interfaz in INTERFACES else base.interfaz,
             mostrar_formato=bool(data.get("mostrar_formato", True)),
-            idioma=texto("idioma", "").strip().lower()[:5],
+            idioma=texto("idioma", "").strip().lower()[:5].strip(),
             tema=tema if tema in TEMAS else base.tema,
         )
 
@@ -851,7 +898,8 @@ class EstadoMonitor:
     tokens_input_total: int = 0
     tokens_output_total: int = 0
 
-    def guardar(self, path: Optional[Path] = None) -> None:
+    def guardar(self, path: Optional[Path] = None) -> bool:
+        """Escribe el estado. False si no se pudo (disco lleno, sin permisos…): quien gasta debe enterarse."""
         path = path or STATE_FILE
         datos = {
             "exitos": self.exitos,
@@ -865,6 +913,8 @@ class EstadoMonitor:
             write_atomic(path, json.dumps(datos, indent=2, ensure_ascii=False))
         except Exception:
             logger.exception("No se pudo guardar el estado")
+            return False
+        return True
 
     @classmethod
     def cargar(cls, path: Optional[Path] = None) -> EstadoMonitor:
@@ -982,6 +1032,9 @@ class JobMessage:
     detalle: str = ""
     error_type: str = ""  # categoría legible por máquina: refusal, auth, server…
 
+    def __post_init__(self) -> None:
+        self.text = limpiar_sustitutos(self.text)
+
     def a_dict(self) -> dict:
         return {
             "id": self.id,
@@ -1043,6 +1096,16 @@ class Job:
         self.modo = modo
         self.system_prompt = system_prompt
         self.batch_id = batch_id  # id del lote en el servidor (modo lote)
+        # Un envío de lote que pudo llegar al servidor sin que nos llegara su respuesta (tiempo agotado, corte, programa
+        # cerrado a mitad): desde cuándo y cuántas órdenes. Mientras esté puesto, antes de enviar se busca ese lote.
+        self.envio_incierto_desde = ""
+        self.envio_incierto_ordenes = 0
+        # El lote más reciente de la cuenta justo antes de intentarlo ("" = ninguno; None = no se pudo mirar): lo que
+        # aparezca por delante en la lista de lotes lo creó el envío (o alguien más), no es anterior.
+        self.envio_incierto_tras: Optional[str] = None
+        # Respuestas ya pagadas que no se pudieron escribir en disco (disco lleno, sin permisos…): se guardan en
+        # memoria para poder verlas, copiarlas o exportarlas mientras el programa siga abierto. No se persisten.
+        self.respuestas_sin_guardar: dict[int, tuple[int, str]] = {}  # orden -> (ciclo, contenido del fichero)
         self.etiqueta = etiqueta  # "cola" = la cola del modo simple; "" = un lote normal
         self.ciclos_completados = 0
         self.messages: list[JobMessage] = [
@@ -1089,12 +1152,16 @@ class Job:
             "modo": self.modo,
             "system_prompt": self.system_prompt,
             "batch_id": self.batch_id,
+            "envio_incierto_desde": self.envio_incierto_desde,
+            "envio_incierto_ordenes": self.envio_incierto_ordenes,
+            "envio_incierto_tras": self.envio_incierto_tras,
             "etiqueta": self.etiqueta,
             "ciclos_completados": self.ciclos_completados,
             "messages": [m.a_dict() for m in list(self.messages)],
         }
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Escribe el lote en disco. False si no se pudo: quien gasta debe enterarse."""
         with self._save_lock:
             try:
                 write_atomic(
@@ -1102,6 +1169,8 @@ class Job:
                 )
             except Exception:
                 logger.exception("No se pudo guardar el Job %s", self.job_id)
+                return False
+            return True
 
     @classmethod
     def load(cls, job_id: str) -> Optional[Job]:
@@ -1122,6 +1191,10 @@ class Job:
                 etiqueta=data.get("etiqueta", "") or "",
             )
             job.ciclos_completados = int(data.get("ciclos_completados", 0))
+            job.envio_incierto_desde = str(data.get("envio_incierto_desde", "") or "")
+            job.envio_incierto_ordenes = max(0, int(data.get("envio_incierto_ordenes", 0) or 0))
+            tras = data.get("envio_incierto_tras")
+            job.envio_incierto_tras = None if tras is None else str(tras)
             job.messages = [JobMessage.desde_dict(m) for m in data["messages"]]
             return job
         except Exception:
@@ -1204,6 +1277,9 @@ class Job:
             m.detalle = ""
             m.error_type = ""
         self.batch_id = ""
+        self.envio_incierto_desde = ""
+        self.envio_incierto_ordenes = 0
+        self.envio_incierto_tras = None
         self.ciclos_completados += 1
         self.save()
 
@@ -1437,7 +1513,9 @@ def _leer_tabla(path: Path, contenido: str, campo: Optional[str]) -> list[str]:
 
 def _leer_jsonl(path: Path, contenido: str, campo: Optional[str]) -> list[str]:
     ordenes: list[str] = []
-    for n, linea in enumerate(contenido.splitlines(), start=1):
+    # Un JSONL separa las líneas SOLO por `\n`: `splitlines()` también parte por U+2028, U+0085 o \x0b, que pueden ir
+    # dentro de un texto JSON sin escapar y lo dejarían cortado por la mitad.
+    for n, linea in enumerate(contenido.split("\n"), start=1):
         if not linea.strip():
             continue
         try:
@@ -1471,7 +1549,7 @@ def listar_campos(origen: Union[str, Path]) -> Optional[list[str]]:
         lector = csv.reader(io.StringIO(contenido, newline=""), delimiter=_delimitador(path, contenido))
         cabecera = next(lector, [])
         return [c.strip() for c in cabecera if c.strip()]
-    for linea in contenido.splitlines():
+    for linea in contenido.split("\n"):
         if linea.strip():
             try:
                 obj = json.loads(linea)
@@ -1547,9 +1625,11 @@ def parse_reset(valor: str) -> Optional[float]:
         return None
     if len(valor) >= 2 and valor[-1].lower() in _UNIDADES:
         try:
-            return float(valor[:-1]) * _UNIDADES[valor[-1].lower()]
+            segundos = float(valor[:-1]) * _UNIDADES[valor[-1].lower()]
         except ValueError:
-            pass
+            segundos = None
+        if segundos is not None:
+            return segundos if math.isfinite(segundos) else None  # «nan s», «1e999h»…: no es un tiempo
     try:
         # Python < 3.11 solo admite 3 o 6 decimales de segundo y no entiende la Z.
         texto = _FRACCION.sub(lambda m: (m.group(1) + "000000")[:7], valor.replace("Z", "+00:00"))
@@ -1706,7 +1786,11 @@ def leer_respuesta(job: Job, msg_id: int, ciclo: int) -> str:
     try:
         contenido = ruta.read_text(encoding="utf-8")
     except OSError:
-        return ""
+        # Una respuesta pagada que no se pudo escribir en disco se conserva en memoria.
+        guardada = getattr(job, "respuestas_sin_guardar", {}).get(msg_id)
+        if not guardada or guardada[0] != ciclo:
+            return ""
+        contenido = guardada[1]
     _, _, respuesta = contenido.partition(MARCA_RESPUESTA)
     return respuesta.strip()
 
@@ -1740,6 +1824,23 @@ def exportar(
     return destino
 
 
+_EMPIEZA_COMO_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+_ES_UN_NUMERO = re.compile(r"[+-]?(\d+[.,]?\d*|[.,]\d+)")
+
+
+def neutralizar_formula(texto: str) -> str:
+    """Evita que una hoja de cálculo ejecute como fórmula una celda de texto («inyección de CSV»).
+
+    Excel, LibreOffice y Google Sheets interpretan como fórmula lo que empieza por `=`, `+`, `-` o `@`: una
+    respuesta (o una pregunta sacada de un fichero ajeno) como `=HYPERLINK("http://…", "pulsa")` podría
+    enviar datos de la hoja a un tercero. Se le antepone un apóstrofo, que la hoja trata como «esto es texto».
+    Los números sueltos (`-5`, `+3,5`) no se tocan: no son fórmulas.
+    """
+    if texto.startswith(_EMPIEZA_COMO_FORMULA) and not _ES_UN_NUMERO.fullmatch(texto.strip()):
+        return "'" + texto
+    return texto
+
+
 def _csv(job: Job, destino: Path, ciclo: int) -> None:
     # utf-8-sig para que Excel en Windows detecte el UTF-8 y no rompa las tildes.
     with open(destino, "w", encoding="utf-8-sig", newline="") as handle:
@@ -1769,10 +1870,10 @@ def _csv(job: Job, destino: Path, ciclo: int) -> None:
                     f"{msg.coste_usd:.6f}",
                     msg.latency_ms,
                     "sí" if msg.truncated else "no",
-                    msg.error_type,
-                    msg.detalle,
-                    msg.text,
-                    leer_respuesta(job, msg.id, ciclo),
+                    neutralizar_formula(msg.error_type),
+                    neutralizar_formula(msg.detalle),
+                    neutralizar_formula(msg.text),
+                    neutralizar_formula(leer_respuesta(job, msg.id, ciclo)),
                 ]
             )
 
@@ -2191,7 +2292,147 @@ def tema_del_sistema() -> str:
 
 
 # ============================================================================
-# 13. Motores: clasificar los errores de la API
+# 13. Una sola copia del programa gastando a la vez
+#    (claude_batch_monitor/instancia_unica.py)
+# ============================================================================
+#
+# Una sola copia del programa gastando a la vez sobre la misma carpeta de datos.
+#
+# El gasto acumulado vive en `state.json`: cada copia lo lee al empezar y lo reescribe entero con cada respuesta.
+# Con dos copias abiertas a la vez, la que escribe última borra lo que sumó la otra y el tope de gasto deja de
+# proteger; además las dos podrían enviar la misma pregunta. Para evitarlo, quien va a gastar toma un bloqueo del
+# sistema operativo sobre un fichero de la carpeta de datos. Lo suelta el propio sistema cuando el programa
+# termina —también si lo matan o se va la luz—, así que no puede quedarse «atascado».
+#
+# Este seguro nunca debe impedir el uso por culpa propia: si el sistema no permite bloquear (carpeta de solo
+# lectura, un disco de red raro…), se deja pasar.
+
+
+try:  # Linux y macOS
+    import fcntl
+except ImportError:  # pragma: no cover - depende del sistema
+    fcntl = None  # type: ignore[assignment]
+try:  # Windows
+    import msvcrt
+except ImportError:  # pragma: no cover - depende del sistema
+    msvcrt = None  # type: ignore[assignment]
+
+ARCHIVO_DE_BLOQUEO = "instancia.lock"
+_RESERVADO = 16  # los primeros bytes son los que se bloquean; el número de proceso se escribe después
+
+
+class BloqueoDeInstancia:
+    """`adquirir()` devuelve False si OTRA copia ya tiene la carpeta de datos en uso."""
+
+    def __init__(self, ruta: Optional[Path] = None):
+        self._ruta = ruta
+        self._archivo: Any = None
+        self.dueno = ""  # número de proceso de la otra copia, si se pudo leer
+
+    @property
+    def ruta(self) -> Path:
+        return self._ruta or (DATA_DIR / ARCHIVO_DE_BLOQUEO)
+
+    def adquirir(self) -> bool:
+        if self._archivo is not None:
+            return True
+        try:
+            archivo = open(self.ruta, "a+b")
+        except OSError:
+            return True  # no se puede ni crear el fichero: no se impide el uso
+        try:
+            libre = self._bloquear(archivo)
+        except Exception:  # noqa: BLE001 - el seguro no puede ser quien rompa el programa
+            logger.exception("No se pudo comprobar si hay otra copia abierta")
+            archivo.close()
+            return True
+        if not libre:
+            self.dueno = self._leer_dueno(archivo)
+            archivo.close()
+            return False
+        try:
+            archivo.seek(_RESERVADO)
+            archivo.truncate()
+            archivo.write(str(os.getpid()).encode("ascii"))
+            archivo.flush()
+        except OSError:
+            pass  # solo es información para quien se encuentre el bloqueo ocupado
+        self._archivo = archivo
+        return True
+
+    def liberar(self) -> None:
+        archivo, self._archivo = self._archivo, None
+        if archivo is None:
+            return
+        try:
+            self._desbloquear(archivo)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            archivo.close()
+        except OSError:
+            pass
+
+    def __enter__(self) -> BloqueoDeInstancia:
+        self.adquirir()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.liberar()
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bloquear(archivo: Any) -> bool:
+        if fcntl is not None:
+            try:
+                fcntl.flock(archivo.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            return True
+        if msvcrt is not None:
+            archivo.seek(0)
+            if os.fstat(archivo.fileno()).st_size < _RESERVADO:
+                archivo.write(b"\0" * _RESERVADO)
+                archivo.flush()
+                archivo.seek(0)
+            try:
+                msvcrt.locking(archivo.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return False
+            return True
+        return True  # ni uno ni otro: no hay con qué bloquear
+
+    @staticmethod
+    def _desbloquear(archivo: Any) -> None:
+        if fcntl is not None:
+            fcntl.flock(archivo.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            archivo.seek(0)
+            msvcrt.locking(archivo.fileno(), msvcrt.LK_UNLCK, 1)
+
+    @staticmethod
+    def _leer_dueno(archivo: Any) -> str:
+        try:
+            archivo.seek(_RESERVADO)
+            texto = archivo.read(20).decode("ascii", "ignore").strip()
+        except (OSError, ValueError):
+            return ""
+        return texto if texto.isdigit() else ""
+
+
+def aviso_de_otra_copia(dueno: str = "") -> str:
+    """Lo que se le dice a quien intenta abrir una segunda copia desde la terminal."""
+    proceso = f" (proceso {dueno})" if dueno else ""
+    return (
+        f"Ya hay otra copia de Claude Batch Monitor en marcha{proceso}. Dos copias a la vez se pisarían el gasto "
+        "acumulado y el tope de gasto dejaría de proteger. Ciérrala (si no ves su ventana, mira la barra de tareas "
+        "o la bandeja del sistema) o usa otra carpeta de datos con la variable CLAUDE_MONITOR_HOME."
+    )
+
+
+# ============================================================================
+# 14. Motores: clasificar los errores de la API
 #    (claude_batch_monitor/core/errors.py)
 # ============================================================================
 #
@@ -2222,7 +2463,7 @@ class Categoria(str, Enum):
     MODELO = "model_not_found"     # 404 sobre el modelo
     NO_ENCONTRADO = "not_found"
     DEMASIADO_GRANDE = "too_large"  # 413
-    SERVIDOR = "server"            # 5xx / 529 / error en mitad del stream: backoff
+    SERVIDOR = "server"            # 5xx / 529 / 408 / 409 / error en mitad del stream: backoff
     OTRO = "other"
 
 
@@ -2296,8 +2537,8 @@ def analizar_error(error: BaseException) -> ErrorApi:
         return devolver(Categoria.DEMASIADO_GRANDE)
     if status in (400, 422) or tipo == "invalid_request_error":
         return devolver(Categoria.PETICION)
-    if status >= 500 or tipo in ("overloaded_error", "api_error", "timeout_error"):
-        return devolver(Categoria.SERVIDOR)
+    if status >= 500 or status in (408, 409) or tipo in ("overloaded_error", "api_error", "timeout_error"):
+        return devolver(Categoria.SERVIDOR)  # 408 y 409 los devuelven pasarelas y proxies: se reintentan como el SDK
     return devolver(Categoria.OTRO)
 
 
@@ -2329,8 +2570,93 @@ def es_sin_conexion(error: BaseException) -> bool:
     return False
 
 
+# ----------------------------------------------------------------------
+# Fallos de la conexión que el SDK no siempre envuelve
+# ----------------------------------------------------------------------
+# Con la respuesta en streaming, un corte a mitad del cuerpo o un tiempo agotado entre trozos salen tal cual
+# de la librería HTTP (no como `anthropic.APIConnectionError`). Se reconocen por NOMBRE de clase, como arriba.
+
+_LIBRERIAS_HTTP = ("httpx", "httpx2", "httpcore", "h11", "ssl", "socket", "builtins", "http", "urllib3")
+_CORTES = {
+    "RemoteProtocolError", "ReadError", "WriteError", "CloseError", "ProtocolError", "IncompleteRead",
+    "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError", "ChunkedEncodingError",
+}
+_TIMEOUTS = {"TimeoutException", "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "TimeoutError", "timeout"}
+_TIMEOUTS_SIN_ENVIO = {"ConnectTimeout", "PoolTimeout", "WriteTimeout"}  # la petición no llegó a salir entera
+
+
+def _clases_de_la_cadena(error: BaseException) -> set[str]:
+    nombres: set[str] = set()
+    for causa in cadena_de_causas(error):
+        for clase in type(causa).__mro__:
+            if clase.__module__.split(".")[0] in _LIBRERIAS_HTTP:
+                nombres.add(clase.__name__)
+    return nombres
+
+
+class FlujoIncompleto(Exception):
+    """Una respuesta en streaming terminó sin entregar el mensaje entero.
+
+    `era_un_flujo` es False si lo recibido ni siquiera era un flujo de la API (un proxy, un portal cautivo…
+    contestó con otra cosa: el servidor no llegó a procesar nada) y True si empezó como tal y se cortó.
+    """
+
+    def __init__(self, era_un_flujo: bool, detalle: str = ""):
+        super().__init__(detalle or (
+            "El flujo de la respuesta se cortó antes de terminar." if era_un_flujo
+            else "La respuesta no era un flujo de la API."))
+        self.era_un_flujo = era_un_flujo
+
+
+def es_corte_de_conexion(error: BaseException) -> bool:
+    """La conexión se rompió a mitad de la petición o de la respuesta (el servidor pudo haberla procesado)."""
+    if any(isinstance(c, FlujoIncompleto) and c.era_un_flujo for c in cadena_de_causas(error)):
+        return True
+    return bool(_clases_de_la_cadena(error) & _CORTES)
+
+
+def es_timeout(error: BaseException) -> bool:
+    return bool(_clases_de_la_cadena(error) & _TIMEOUTS)
+
+
+def timeout_con_peticion_enviada(error: BaseException) -> bool:
+    """True si el tiempo se agotó DESPUÉS de enviar la petición: el servidor pudo procesarla y cobrarla.
+
+    Si no se puede saber, se supone que sí: para un tope de gasto, la duda cuenta como gasto.
+    """
+    return not (_clases_de_la_cadena(error) & _TIMEOUTS_SIN_ENVIO)
+
+
+def pudo_haberse_procesado(error: BaseException) -> bool:
+    """¿Pudo el servidor procesar la petición aunque no tengamos su respuesta?
+
+    Un 4xx (salvo 408 y 409) lo rechazó sin ejecutarla, y si no había conexión la petición ni salió.
+    Un 5xx, un tiempo agotado tras enviarla o un corte a mitad: no se sabe, y en un lote eso significa
+    que pudo crearse (y cobrarse) sin que nos enteráramos.
+    """
+    estado = getattr(error, "status_code", None)
+    if isinstance(estado, int):
+        return estado >= 500 or estado in (408, 409)
+    if es_sin_conexion(error) or es_respuesta_ilegible(error):
+        return False
+    if es_timeout(error):
+        return timeout_con_peticion_enviada(error)
+    return True
+
+
+def es_respuesta_ilegible(error: BaseException) -> bool:
+    """Llegó una respuesta completa pero no es lo que la API envía (una página de un proxy, un portal cautivo…)."""
+    for causa in cadena_de_causas(error):
+        nombre = type(causa).__name__
+        if nombre in ("JSONDecodeError", "APIResponseValidationError", "UnicodeDecodeError"):
+            return True
+        if isinstance(causa, FlujoIncompleto) and not causa.era_un_flujo:
+            return True
+    return False
+
+
 # ============================================================================
-# 14. Motores: lo común (contabilidad, esperas, guardado y parada)
+# 15. Motores: lo común (contabilidad, esperas, guardado y parada)
 #    (claude_batch_monitor/core/base.py)
 # ============================================================================
 #
@@ -2359,6 +2685,10 @@ MARGEN_RATE_LIMIT_SEC = 2.0
 MAX_429_SIN_INFO = 10
 # Tiempo máximo acumulado esperando a que vuelva la conexión antes de rendirse.
 MAX_SIN_CONEXION_SEC = 600
+# Lo más que se hace caso a un `retry-after`; más allá (o un valor que no es un número) se ignora.
+MAX_ESPERA_API_SEC = 24 * 3600
+# Veces que una misma orden puede agotar el tiempo DESPUÉS de enviarse: cada una pudo cobrarse.
+MAX_TIMEOUTS_POR_ORDEN = 3
 RESPUESTA_VACIA = "(Claude devolvió una respuesta vacía.)"
 AVISO_TRUNCADA = "[ADVERTENCIA: respuesta truncada por el límite de tokens]"
 
@@ -2406,6 +2736,7 @@ class Contadores:
     sin_info_429: int = 0
     intentos_sin_conexion: int = 0
     segundos_sin_conexion: float = 0.0
+    timeouts_enviados: int = 0  # tiempos agotados con la petición ya enviada (pudo cobrarse)
 
 
 @dataclass
@@ -2452,6 +2783,15 @@ def build_request_params(config: Configuracion, texto: str) -> dict:
     return params
 
 
+def _segundos_de_cabecera(valor: Any) -> Optional[float]:
+    """Los segundos de un `retry-after`, o None si no es un número razonable (NaN, infinito, negativo, enorme)."""
+    try:
+        segundos = float(valor)
+    except (TypeError, ValueError):
+        return None
+    return segundos if math.isfinite(segundos) and 0 <= segundos <= MAX_ESPERA_API_SEC else None
+
+
 def _categoria_rechazo(response: Any) -> str:
     detalles = getattr(response, "stop_details", None)
     if detalles is None:
@@ -2484,12 +2824,16 @@ class EngineBase:
         self._lock_estado = threading.RLock()
         self._cond = threading.Condition(self._lock_estado)
         self._reservado = Decimal(0)
+        # Peor caso de las peticiones que se abandonaron por tiempo sin saber si el servidor las cobró:
+        # cuentan contra el tope (si no, un servidor lento podría cobrar muchas veces sin que se viera).
+        self._incierto = Decimal(0)
+        self._con_timeout: set[int] = set()  # órdenes que ya agotaron el tiempo: se reintentan en streaming
 
     # ------------------------------------------------------------------
     # Cliente
     # ------------------------------------------------------------------
 
-    def inicializar_cliente(self) -> None:
+    def _cliente_nuevo(self) -> Any:
         if anthropic is None:
             raise ValueError(f"Falta la librería 'anthropic'. Instálala con: {comando_para_instalar('anthropic')}")
         api_key = obtener_api_key()
@@ -2497,9 +2841,12 @@ class EngineBase:
             raise ValueError(
                 "No hay API key de Anthropic. Pégala en la aplicación o define ANTHROPIC_API_KEY."
             )
-        self._client = anthropic.Anthropic(
+        return anthropic.Anthropic(
             api_key=api_key, timeout=float(self.config.timeout_api_sec), max_retries=0
         )
+
+    def inicializar_cliente(self) -> None:
+        self._client = self._cliente_nuevo()
 
     @property
     def client(self) -> Any:
@@ -2562,12 +2909,9 @@ class EngineBase:
         el cupo, adivinarlo es peor.
         """
         h = self._cabeceras(error)
-        retry_after = h.get("retry-after")
-        if retry_after:
-            try:
-                return float(retry_after) + MARGEN_RATE_LIMIT_SEC, True
-            except (TypeError, ValueError):
-                pass
+        retry_after = _segundos_de_cabecera(h.get("retry-after"))
+        if retry_after is not None:
+            return retry_after + MARGEN_RATE_LIMIT_SEC, True
 
         agotados = []
         for fam in ("requests", "tokens", "input-tokens", "output-tokens"):
@@ -2585,8 +2929,9 @@ class EngineBase:
                 return segundos + MARGEN_RATE_LIMIT_SEC, True
 
         m = re.search(r"try again in\s+([\d.]+)\s*s", str(error), re.IGNORECASE)
-        if m:
-            return float(m.group(1)) + MARGEN_RATE_LIMIT_SEC, True
+        indicado = _segundos_de_cabecera(m.group(1)) if m else None
+        if indicado is not None:
+            return indicado + MARGEN_RATE_LIMIT_SEC, True
         return 60.0, False
 
     def espera_rate_limit(self, error: Any) -> float:
@@ -2599,17 +2944,17 @@ class EngineBase:
         vez y vuelven a tumbar al servidor. Sortear en todo el intervalo [0, techo]
         los desincroniza.
         """
-        retry_after = self._cabeceras(error).get("retry-after")
-        if retry_after:
-            try:
-                return float(retry_after) + 5
-            except (TypeError, ValueError):
-                pass
+        retry_after = _segundos_de_cabecera(self._cabeceras(error).get("retry-after"))
+        if retry_after is not None:
+            return retry_after + 5
         techo = min(30 * (2 ** min(max(intentos - 1, 0), 6)), MAX_BACKOFF_SECONDS)
         return max(1.0, random.uniform(0, techo))
 
     def esperar(self, segundos: float, cb: Callbacks) -> bool:
         """Espera cancelable. False si se interrumpió (parada o hora límite)."""
+        if not math.isfinite(segundos):
+            segundos = 60.0  # un valor que no es un tiempo no puede dejar el programa esperando para siempre
+        segundos = max(0.0, segundos)
         fin = time.monotonic() + segundos
         cb.emit("tick", segundos, segundos)
         while True:
@@ -2677,7 +3022,7 @@ class EngineBase:
         tope = self.config.tope_gasto_usd
         if tope <= 0:
             return None
-        return max(Decimal(0), tope - self.gasto_actual())
+        return max(Decimal(0), tope - self.gasto_actual() - self._incierto)
 
     def _reservar(self, coste_max: Decimal, cb: Callbacks) -> bool:
         """Reserva el peor caso de una petición. False si el tope impide enviarla.
@@ -2692,15 +3037,19 @@ class EngineBase:
             while True:
                 if self.evento_detener.is_set():
                     return False
-                gastado = self.estado.gasto_acumulado_usd
+                gastado = self.estado.gasto_acumulado_usd + self._incierto
                 if gastado + self._reservado + coste_max <= tope:
                     self._reservado += coste_max
                     return True
                 if self._reservado == 0:
+                    dudoso = (
+                        f" (incluye hasta {formatear_usd(self._incierto)} de peticiones que agotaron el tiempo "
+                        "y podrían haberse cobrado)" if self._incierto > 0 else ""
+                    )
                     texto = (
                         f"TOPE DE GASTO: la siguiente orden podría costar hasta {formatear_usd(coste_max)} "
                         f"y solo quedan {formatear_usd(max(Decimal(0), tope - gastado))} de tu tope de "
-                        f"{formatear_usd(tope, 2)}. Lote detenido sin enviarla. "
+                        f"{formatear_usd(tope, 2)}{dudoso}. Lote detenido sin enviarla. "
                         "Sube el tope o baja max_tokens."
                     )
                     logger.warning(texto)
@@ -2747,6 +3096,7 @@ class EngineBase:
         lote: bool = False,
         reserva: Decimal = Decimal(0),
         comprobar_tope: bool = True,
+        guardar_ya: bool = True,
     ) -> bool:
         """Guarda una respuesta ya recibida (y pagada). True si se puede seguir.
 
@@ -2757,11 +3107,14 @@ class EngineBase:
         `reserva` es el peor caso que se reservó antes de enviar: se canjea por el
         coste real en el mismo instante en que se suma el gasto, sin dejar un hueco
         en el que otro hilo pueda reservar de más.
+
+        `guardar_ya=False` (la recogida de un lote) deja para un punto de control el guardado del estado del lote y
+        del gasto: reescribirlos enteros con cada uno de 100 000 resultados costaría más de lo que pesa el lote.
         """
         canjeada = [False]
         try:
             return self._registrar(
-                msg, response, ciclo, cb, latency_ms, lote, reserva, canjeada, comprobar_tope
+                msg, response, ciclo, cb, latency_ms, lote, reserva, canjeada, comprobar_tope, guardar_ya
             )
         finally:
             if reserva and not canjeada[0]:  # algo falló antes de canjearla: no dejarla colgada
@@ -2778,6 +3131,7 @@ class EngineBase:
         reserva: Decimal,
         canjeada: list,
         comprobar_tope: bool,
+        guardar_ya: bool = True,
     ) -> bool:
         consumo = leer_consumo(getattr(response, "usage", None))
         coste = coste_consumo(consumo, self.precios, lote)
@@ -2789,7 +3143,7 @@ class EngineBase:
             for b in (getattr(response, "content", None) or [])
             if isinstance(getattr(b, "text", None), str)
         ]
-        texto = "\n".join(bloques).strip()
+        texto = limpiar_sustitutos("\n".join(bloques).strip())
         truncada = stop in ("max_tokens", "model_context_window_exceeded")
 
         if rechazada:
@@ -2811,20 +3165,21 @@ class EngineBase:
             if not rechazada:
                 self.estado.exitos += 1
                 self.estado.ultimo_exito = datetime.now(timezone.utc).isoformat()
-            self.estado.guardar()
+            estado_guardado = self.estado.guardar() if guardar_ya else True
             gasto = self.estado.gasto_acumulado_usd
             if reserva:  # canje atómico: peor caso reservado -> coste real
                 self._reservado = max(Decimal(0), self._reservado - reserva)
                 canjeada[0] = True
                 self._cond.notify_all()
 
+        error_de_disco: Optional[BaseException] = None
+        contenido = f"{MARCA_SOLICITUD}\n{msg.text}\n\n{MARCA_RESPUESTA}\n{texto}\n"
         try:
-            write_atomic(
-                self.job.response_path(msg.id, ciclo),
-                f"{MARCA_SOLICITUD}\n{msg.text}\n\n{MARCA_RESPUESTA}\n{texto}\n",
-            )
-        except OSError:
+            write_atomic(self.job.response_path(msg.id, ciclo), contenido)
+        except OSError as error:
             logger.exception("No se pudo guardar la respuesta de la orden %s", msg.id)
+            error_de_disco = error
+            self.job.respuestas_sin_guardar[msg.id] = (ciclo, contenido)  # pagada: que se pueda ver, copiar y volcar luego
 
         msg.status = STATUS_REFUSED if rechazada else STATUS_COMPLETED
         msg.truncated = truncada and not rechazada
@@ -2835,19 +3190,77 @@ class EngineBase:
         msg.latency_ms = latency_ms
         msg.detalle = detalle
         msg.error_type = "refusal" if rechazada else ""
-        self.job.save()
+        lote_guardado = self.job.save() if guardar_ya else True
 
         cb.emit("resultado", msg)
         cb.emit("gasto", gasto, consumo)
+        sin_guardar = [
+            nombre for nombre, bien in (
+                ("la respuesta", error_de_disco is None),
+                ("el estado del lote", lote_guardado),
+                ("el gasto acumulado", estado_guardado),
+            ) if not bien
+        ]
+        if sin_guardar:
+            self._parar_por_disco(cb, msg, sin_guardar, error_de_disco)
+            return False
         # En un lote ya está todo pagado en el servidor: el tope se comprueba una vez al final.
         return self._comprobar_tope(cb) if comprobar_tope else True
 
-    def marcar_fallo(self, msg: JobMessage, detalle: str, cb: Callbacks, error_type: str = "other") -> None:
+    def volcar_respuestas_sin_guardar(self) -> bool:
+        """Escribe en disco las respuestas pagadas que antes no cupieron. True si no queda ninguna por escribir."""
+        pendientes = self.job.respuestas_sin_guardar
+        for msg_id, (ciclo, contenido) in list(pendientes.items()):
+            try:
+                write_atomic(self.job.response_path(msg_id, ciclo), contenido)
+            except OSError:
+                return False
+            pendientes.pop(msg_id, None)
+            logger.info("Respuesta de la orden %s guardada por fin en disco", msg_id)
+        return True
+
+    def _parar_por_disco(
+        self, cb: Callbacks, msg: Optional[JobMessage], sin_guardar: list[str], error: Optional[BaseException]
+    ) -> None:
+        """Lo pagado no se puede escribir en disco: seguir sería pagar respuestas que se perderían."""
+        with self._cond:  # mirar y marcar, de una vez: con varios hilos, solo uno debe ser «el primero»
+            primera_vez = self.stop_reason is None or self.stop_reason in _DEBILES
+            self.marcar_parada(StopReason.FATAL)
+        if not primera_vez:
+            return  # con varios hilos, los demás fallarán igual: se cuenta una sola vez
+        causa = f" ({error})" if error is not None else ""
+        de_la_orden = f" de la orden {msg.id}" if msg is not None else ""
+        texto = (
+            f"No se pudo guardar en el disco {' ni '.join(sin_guardar)}{de_la_orden}{causa}. "
+            "Se detiene todo para no pagar respuestas que luego no se podrían conservar. La respuesta sigue "
+            "disponible mientras el programa esté abierto: cópiala o expórtala. "
+            f"Libera espacio o revisa los permisos de {DATA_DIR} y reanuda."
+        )
+        logger.critical(texto)
+        cb.emit("error", texto)
+        self._avisar("No se puede guardar", texto)
+
+    def marcar_fallo(
+        self, msg: JobMessage, detalle: str, cb: Callbacks, error_type: str = "other", guardar: bool = True
+    ) -> None:
         msg.status = STATUS_FAILED
         msg.detalle = detalle
         msg.error_type = error_type
-        self.job.save()
+        if guardar:
+            self.job.save()
         cb.emit("resultado", msg)
+
+    def punto_de_control(self, cb: Callbacks) -> bool:
+        """Escribe en disco el estado del lote y el gasto acumulado. False (y se para) si el disco no lo admite."""
+        with self._cond:
+            estado_ok = self.estado.guardar()
+        lote_ok = self.job.save()
+        if estado_ok and lote_ok:
+            return True
+        self._parar_por_disco(
+            cb, None, [n for n, bien in (("el estado del lote", lote_ok), ("el gasto acumulado", estado_ok)) if not bien], None
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Cierre
@@ -2858,6 +3271,7 @@ class EngineBase:
         justo cuando algo falla es cuando más falta hace saber qué se hizo y qué se pagó."""
         total = self.job.total_count()
         completados = self.job.completed_count()
+        self.volcar_respuestas_sin_guardar()  # si el disco ya admite escrituras, que no se pierda nada de lo pagado
         try:
             partes = [
                 f"# Resumen del Ciclo {ciclo}",
@@ -2918,22 +3332,27 @@ class EngineBase:
 
         # OJO con el orden: APITimeoutError HEREDA de APIConnectionError. Con el orden
         # inverso un timeout normal se tomaba por "sin red" y abortaba el lote entero (C5).
-        if isinstance(error, anthropic.APITimeoutError):
-            return self._reintentar_con_backoff(msg, error, cb, cont, "Timeout de la API")
+        # (En streaming, un tiempo agotado entre trozos sale sin envolver: se reconoce por el nombre.)
+        if isinstance(error, anthropic.APITimeoutError) or (
+            not isinstance(error, anthropic.APIStatusError) and es_timeout(error)
+        ):
+            return self._manejar_timeout(msg, error, cb, cont)
 
         if isinstance(error, anthropic.APIConnectionError):
             if es_sin_conexion(error):
                 return self._esperar_conexion(cb, cont)
-            # La conexión se cortó a mitad: no sabemos si el servidor llegó a procesar
-            # la petición. Parar evita facturar un duplicado.
-            detalle = "Se cortó la conexión con la API. Lote pausado para evitar cobros duplicados."
-            self._fallar(msg, detalle, cb, "connection")
-            cb.emit("error", detalle)
-            self.marcar_parada(StopReason.NETWORK)
-            return Decision.PARAR
+            return self._parar_por_corte(msg, cb)
 
         if isinstance(error, anthropic.APIStatusError):
             return self._manejar_estado(analizar_error(error), error, cb, cont, msg)
+
+        # Con la respuesta en streaming, el SDK deja pasar el corte de la conexión sin envolverlo.
+        if es_corte_de_conexion(error):
+            return self._parar_por_corte(msg, cb)
+
+        # Una respuesta entera pero que no es de la API (portal cautivo, proxy…): no la procesó el servidor.
+        if es_respuesta_ilegible(error):
+            return self._reintentar_con_backoff(msg, error, cb, cont, "Respuesta ilegible de la API")
 
         logger.error("Error inesperado", exc_info=error)
         detalle = f"Error inesperado: {error}"
@@ -2941,6 +3360,62 @@ class EngineBase:
         cb.emit("error", detalle)
         self.marcar_parada(StopReason.FATAL)
         return Decision.PARAR
+
+    def manejar_error_de_consulta(self, error: Exception, cb: Callbacks, cont: Contadores) -> Decision:
+        """Como `manejar_error`, para una consulta que ni cuesta ni cambia nada en el servidor.
+
+        Ver el estado de un lote, bajar sus resultados o listar los lotes recientes se puede repetir sin riesgo de
+        cobrar dos veces. Por eso un corte de la conexión o un tiempo agotado se reintentan con espera (hasta el
+        máximo de errores) en vez de parar: pararía justo la espera de hasta 24 h que más cuesta repetir a mano.
+        Todo lo demás (429, saldo, clave, 5xx, sin conexión…) sigue la política de siempre.
+        """
+        if not isinstance(error, anthropic.APIStatusError):
+            if isinstance(error, anthropic.APITimeoutError) or es_timeout(error):
+                observar_seguro(self.rate_limits, error)
+                return self._reintentar_con_backoff(None, error, cb, cont, "El servidor tardó demasiado en responder")
+            if not es_sin_conexion(error) and (
+                isinstance(error, anthropic.APIConnectionError) or es_corte_de_conexion(error)
+            ):
+                observar_seguro(self.rate_limits, error)
+                return self._reintentar_con_backoff(None, error, cb, cont, "Se cortó la conexión con el servidor")
+        return self.manejar_error(error, cb, cont)
+
+    def _parar_por_corte(self, msg: Optional[JobMessage], cb: Callbacks) -> Decision:
+        """La conexión se cortó a mitad: no sabemos si el servidor llegó a procesar la petición.
+
+        Parar evita facturar un duplicado.
+        """
+        detalle = "Se cortó la conexión con la API. Lote pausado para evitar cobros duplicados."
+        self._fallar(msg, detalle, cb, "connection")
+        cb.emit("error", detalle)
+        self.marcar_parada(StopReason.NETWORK)
+        return Decision.PARAR
+
+    def _manejar_timeout(self, msg: Optional[JobMessage], error: Exception, cb: Callbacks, cont: Contadores) -> Decision:
+        """Se agotó el tiempo. Si la petición ya había salido, el servidor pudo procesarla y cobrarla."""
+        if timeout_con_peticion_enviada(error):
+            cont.timeouts_enviados += 1
+            if cont.timeouts_enviados >= MAX_TIMEOUTS_POR_ORDEN:
+                donde = f" en la orden {msg.id}" if msg is not None else ""
+                detalle = (
+                    f"La API no responde a tiempo{donde} (se agotó el tiempo {cont.timeouts_enviados} veces con la "
+                    "petición ya enviada). Se para para no cobrar lo mismo varias veces: sube el tiempo máximo por "
+                    "petición o baja max_tokens."
+                )
+                self._fallar(msg, detalle, cb, "timeout")
+                cb.emit("error", detalle)
+                self._avisar("Lote pausado", detalle)
+                self.marcar_parada(StopReason.NETWORK)
+                return Decision.PARAR
+        return self._reintentar_con_backoff(msg, error, cb, cont, "Timeout de la API")
+
+    def _anotar_incierto(self, coste_max: Decimal, msg: Optional[JobMessage]) -> None:
+        """Una petición se abandonó por tiempo con el servidor posiblemente trabajando: su peor caso cuenta como gasto."""
+        with self._cond:
+            self._incierto += coste_max
+            if msg is not None:
+                self._con_timeout.add(msg.id)  # el reintento va en streaming: no tiene un tiempo total que agotar
+        logger.warning("Petición abandonada por tiempo: se cuenta hasta %s como posible gasto", formatear_usd(coste_max))
 
     def _manejar_estado(
         self,
@@ -3091,7 +3566,7 @@ class EngineBase:
 
 
 # ============================================================================
-# 15. Motor inmediato (Messages API)
+# 16. Motor inmediato (Messages API)
 #    (claude_batch_monitor/core/sequential.py)
 # ============================================================================
 #
@@ -3213,6 +3688,8 @@ class SequentialEngine(EngineBase):
                 respuesta, ms = self._llamar_api(msg, cb)
             except Exception as error:
                 self._liberar(coste_max)
+                if es_timeout(error) and timeout_con_peticion_enviada(error):
+                    self._anotar_incierto(coste_max, msg)
                 decision = self.manejar_error(error, cb, cont, msg)
                 if decision is Decision.PARAR:
                     return False
@@ -3220,6 +3697,26 @@ class SequentialEngine(EngineBase):
                     return True
                 continue
             return self.registrar_respuesta(msg, respuesta, ciclo, cb, ms, reserva=coste_max)
+
+    @staticmethod
+    def _mensaje_final(stream: Any) -> Any:
+        """El mensaje entero de un streaming, o `FlujoIncompleto` si lo recibido no llegó a serlo.
+
+        Sin esto, un flujo vacío (un proxy que contesta con una página, una conexión cerrada antes de empezar) salía
+        como un `AssertionError` del SDK y se tomaba por un fallo inesperado que paraba todo; y uno cortado a mitad
+        podía darse por bueno con la respuesta a medias.
+        """
+        try:
+            respuesta = stream.get_final_message()
+        except AssertionError as error:
+            try:
+                era_un_flujo = "text/event-stream" in str(stream.response.headers.get("content-type", ""))
+            except Exception:
+                era_un_flujo = True  # si no se puede saber, se supone lo peor: pudo procesarse
+            raise FlujoIncompleto(era_un_flujo) from error
+        if getattr(respuesta, "stop_reason", "") is None:
+            raise FlujoIncompleto(True)  # empezó y no llegó el final del mensaje
+        return respuesta
 
     def _llamar_api(self, msg: JobMessage, cb: Callbacks) -> tuple[Any, int]:
         """Una llamada a la API. Devuelve (respuesta, latencia en ms)."""
@@ -3231,12 +3728,12 @@ class SequentialEngine(EngineBase):
             extra["extra_body"] = {"output_config": params.pop("output_config")}
 
         inicio = time.monotonic()
-        if self.config.usa_streaming:
+        if self.config.usa_streaming or msg.id in self._con_timeout:
             with self.client.messages.stream(**params, **extra) as stream:
                 observar_seguro(self.rate_limits, stream)
                 for trozo in stream.text_stream:
                     cb.emit("delta", msg.id, trozo)
-                respuesta = stream.get_final_message()
+                respuesta = self._mensaje_final(stream)
         else:
             # Respuesta cruda: las cabeceras de cuota se leen en TODAS las respuestas,
             # no solo al recibir un 429, para frenar antes de chocar con el límite.
@@ -3260,7 +3757,7 @@ class SequentialEngine(EngineBase):
 
 
 # ============================================================================
-# 16. Motor de lote (Message Batches API, mitad de precio)
+# 17. Motor de lote (Message Batches API, mitad de precio)
 #    (claude_batch_monitor/core/batch.py)
 # ============================================================================
 #
@@ -3284,11 +3781,50 @@ LIMITE_BYTES = 256 * 1024 * 1024
 SOBRECARGA_POR_PETICION = 400  # bytes de JSON alrededor de cada orden
 INTERVALO_MIN_SEC = 10.0
 INTERVALO_MAX_SEC = 60.0
+# Para reconocer un lote que el servidor creó sin que nos llegara su respuesta.
+HOLGURA_RELOJES = timedelta(minutes=10)  # lo que pueden diferir el reloj de esta máquina y el del servidor
+MAX_LOTES_A_MIRAR = 200
+# Al recoger un lote, el estado y el gasto se escriben a intervalos, no con cada resultado: son del tamaño de TODO el lote.
+RESULTADOS_ENTRE_PUNTOS_DE_CONTROL = 200
+SEGUNDOS_ENTRE_PUNTOS_DE_CONTROL = 20.0
+
+
+class _Busqueda(Enum):
+    ENCONTRADO = "found"     # el servidor sí lo creó: se sigue con ese
+    SIN_RASTRO = "none"      # no hay ningún lote así: se puede enviar
+    PARAR = "stop"           # no se pudo comprobar, o hay dudas: no se envía
 
 
 def custom_id(msg: JobMessage) -> str:
     """Id estable de una orden dentro del lote (`^[a-zA-Z0-9_-]{1,64}$`)."""
     return f"m{msg.id:06d}"
+
+
+def _fecha(valor: Any) -> Optional[datetime]:
+    """Una fecha de la API (datetime o texto ISO) como datetime con zona horaria; None si no se entiende."""
+    if isinstance(valor, str):
+        try:
+            valor = datetime.fromisoformat(valor.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(valor, datetime):
+        return None
+    return valor if valor.tzinfo else valor.replace(tzinfo=timezone.utc)
+
+
+def _ordenes_del_lote(lote: Any) -> int:
+    contadores = getattr(lote, "request_counts", None)
+    return sum(
+        int(getattr(contadores, clave, 0) or 0)
+        for clave in ("processing", "succeeded", "errored", "canceled", "expired")
+    )
+
+
+def _cerrado(cliente: Any) -> bool:
+    try:
+        return bool(cliente.is_closed())
+    except Exception:
+        return False  # un doble sin `is_closed`, o cualquier otra cosa: se usa tal cual
 
 
 def _datos_del_error(resultado: Any) -> tuple[str, str]:
@@ -3342,9 +3878,10 @@ class BatchEngine(EngineBase):
         cb: Callbacks,
         al_no_existir: Optional[Callable[[], None]] = None,
     ) -> Any:
-        """Una llamada a la API con la misma política de errores que el motor inmediato.
+        """Una consulta de solo lectura a la API (estado de un lote, lista de lotes), con reintentos.
 
-        Devuelve None si hay que abandonar (la razón ya está en `stop_reason`).
+        No cuesta nada ni cambia nada en el servidor, así que se puede repetir sin miedo a cobrar dos veces (véase
+        `manejar_error_de_consulta`). Devuelve None si hay que abandonar (la razón ya está en `stop_reason`).
         """
         cont = Contadores()
         while True:
@@ -3359,7 +3896,7 @@ class BatchEngine(EngineBase):
                 if self.manejar_error(error, cb, cont) is Decision.PARAR:
                     return None
             except Exception as error:
-                if self.manejar_error(error, cb, cont) is not Decision.REINTENTAR:
+                if self.manejar_error_de_consulta(error, cb, cont) is not Decision.REINTENTAR:
                     return None
 
     # ------------------------------------------------------------------
@@ -3395,13 +3932,140 @@ class BatchEngine(EngineBase):
             for m in pendientes
         ]
         cb.emit("estado", f"Enviando {len(pendientes):,} órdenes como un lote…", True)
-        lote = self._llamar(lambda: self.client.messages.batches.create(requests=peticiones), cb)
-        if lote is None:
-            return
+        self._crear_lote(peticiones, cb)
+
+    # ------------------------------------------------------------------
+    # Crear el lote sin crear dos
+    # ------------------------------------------------------------------
+
+    def _crear_lote(self, peticiones: list[dict], cb: Callbacks) -> bool:
+        """Crea el lote en el servidor y apunta su id. Nunca crea dos por un mismo envío.
+
+        Si la petición pudo llegar pero no su respuesta (tiempo agotado, corte, un 5xx, o el programa se cerró en
+        pleno envío), el servidor pudo crear —y cobrar— el lote sin que lo supiéramos, y repetir el envío
+        crearía otro. Por eso el envío se apunta en disco ANTES de hacerlo, y antes de repetirlo (en esta
+        ejecución o en la siguiente) se busca ese lote entre los recientes de la cuenta.
+        """
+        cont = Contadores()
+        n = len(peticiones)
+        if self.job.envio_incierto_desde:  # un envío anterior quedó sin respuesta
+            busqueda = self._buscar_envio_anterior(cb)
+            if busqueda is not _Busqueda.SIN_RASTRO:
+                return busqueda is _Busqueda.ENCONTRADO
+        while True:
+            if self._debe_parar():
+                return False
+            if not self.job.envio_incierto_desde:
+                # Antes de apuntarlo, se anota cuál es el último lote de la cuenta: lo que aparezca después de él
+                # es lo único que puede ser el nuestro (no depende de que los relojes coincidan).
+                self.job.envio_incierto_tras = self._ultimo_lote_de_la_cuenta()
+                self.job.envio_incierto_desde = datetime.now(timezone.utc).isoformat()
+                self.job.envio_incierto_ordenes = n
+                self.job.save()
+            try:
+                lote = self.client.messages.batches.create(requests=peticiones)
+            except Exception as error:
+                if not pudo_haberse_procesado(error):
+                    self._olvidar_envio()  # el servidor ni lo vio (o lo rechazó): no hay nada que buscar
+                if self.manejar_error(error, cb, cont) is not Decision.REINTENTAR:
+                    return False
+                if self.job.envio_incierto_desde:  # ya esperó lo que tocaba: ¿llegó a crearse?
+                    busqueda = self._buscar_envio_anterior(cb)
+                    if busqueda is not _Busqueda.SIN_RASTRO:
+                        return busqueda is _Busqueda.ENCONTRADO
+                continue
+            self._fijar_lote(lote, n, False, cb)
+            return True
+
+    def _ultimo_lote_de_la_cuenta(self) -> Optional[str]:
+        """Id del lote más reciente de la cuenta ("" si no hay ninguno); None si no se pudo mirar."""
+        try:
+            for lote in self.client.messages.batches.list(limit=1):
+                return str(lote.id)
+            return ""
+        except Exception:
+            logger.warning("No se pudo mirar cuál es el último lote de la cuenta", exc_info=True)
+            return None  # sin ese dato, la búsqueda se limita por la fecha (con holgura para los relojes)
+
+    def _olvidar_envio(self) -> None:
+        if self.job.envio_incierto_desde:
+            self.job.envio_incierto_desde = ""
+            self.job.envio_incierto_ordenes = 0
+            self.job.envio_incierto_tras = None
+            self.job.save()
+
+    def _fijar_lote(self, lote: Any, n: int, adoptado: bool, cb: Callbacks) -> None:
         self.job.batch_id = str(lote.id)
+        self.job.envio_incierto_desde = ""
+        self.job.envio_incierto_ordenes = 0
+        self.job.envio_incierto_tras = None
         self.job.save()
-        logger.info("Lote %s enviado: %d órdenes (id del servidor %s)", self.job.job_id, len(pendientes), lote.id)
-        cb.emit("estado", f"Lote enviado ({len(pendientes):,} órdenes). Id: {lote.id}", True)
+        if adoptado:
+            texto = f"El envío anterior sí había creado el lote {lote.id} ({n:,} órdenes): sigo con ese en vez de enviar otro."
+            logger.warning(texto)
+        else:
+            texto = f"Lote enviado ({n:,} órdenes). Id: {lote.id}"
+            logger.info("Lote %s enviado: %d órdenes (id del servidor %s)", self.job.job_id, n, lote.id)
+        cb.emit("estado", texto, True)
+
+    def _buscar_envio_anterior(self, cb: Callbacks) -> _Busqueda:
+        """¿Llegó a crear el servidor el lote de un envío que quedó sin respuesta?
+
+        Se busca entre los lotes de la cuenta creados después del último que había al enviar (si se anotó cuál era;
+        si no, entre los de los últimos minutos, con holgura para los relojes) uno con el mismo número de órdenes
+        y que no sea ya de otra tarea nuestra. Si hay exactamente uno, es el nuestro.
+        """
+        desde = _fecha(self.job.envio_incierto_desde)
+        n = self.job.envio_incierto_ordenes
+        if desde is None or n <= 0:
+            self._olvidar_envio()
+            return _Busqueda.SIN_RASTRO
+        desde -= HOLGURA_RELOJES
+        tras = self.job.envio_incierto_tras
+        cb.emit("estado", "Comprobando si el envío anterior llegó a crear el lote…", True)
+
+        def recientes() -> list:
+            salida: list = []
+            for lote in self.client.messages.batches.list(limit=100):  # del más nuevo al más viejo
+                if tras is not None:
+                    if str(lote.id) == tras:
+                        break  # de aquí hacia atrás ya existía antes de enviar: no puede ser el nuestro
+                else:
+                    creado = _fecha(getattr(lote, "created_at", None))
+                    if creado is not None and creado < desde:
+                        break
+                salida.append(lote)
+                if len(salida) >= MAX_LOTES_A_MIRAR:
+                    break
+            return salida
+
+        vistos = self._llamar(recientes, cb)
+        if vistos is None:
+            return _Busqueda.PARAR  # no se pudo comprobar: sin saberlo, no se envía otro
+        ajenos = {d["batch_id"] for d in listar_jobs() if d["batch_id"] and d["job_id"] != self.job.job_id}
+        candidatos = [
+            lote for lote in vistos
+            if (tras is not None or _fecha(getattr(lote, "created_at", None)) is not None)  # sin línea base, hace falta fecha
+            and _ordenes_del_lote(lote) == n and str(lote.id) not in ajenos
+        ]
+        if not candidatos:
+            self._olvidar_envio()
+            return _Busqueda.SIN_RASTRO
+        if len(candidatos) == 1:
+            self._fijar_lote(candidatos[0], n, True, cb)
+            return _Busqueda.ENCONTRADO
+
+        ids = ", ".join(str(lote.id) for lote in candidatos[:5])
+        texto = (
+            f"El envío anterior quedó sin respuesta y hay {len(candidatos)} lotes recientes de {n:,} órdenes en tu "
+            f"cuenta ({ids}): no sé cuál es el tuyo y enviar otro podría cobrarte dos veces. Míralos en la consola "
+            "de Anthropic (Batches). Si ninguno es el tuyo, pulsa Reanudar otra vez y se enviará uno nuevo."
+        )
+        self._olvidar_envio()  # el aviso se da una vez; la siguiente reanudación ya es decisión de la persona
+        logger.warning(texto)
+        cb.emit("error", texto)
+        self.marcar_parada(StopReason.FATAL)
+        return _Busqueda.PARAR
 
     def _cabe_en_el_tope(self, pendientes: list[JobMessage], cb: Callbacks) -> bool:
         """El peor caso del lote entero debe caber en lo que queda del tope."""
@@ -3487,9 +4151,41 @@ class BatchEngine(EngineBase):
     def _recoger(self, cb: Callbacks, ciclo: int) -> None:
         por_id = {custom_id(m): m for m in self.job.messages}
         vistos: set[str] = set()
+        cont = Contadores()
         cb.emit("estado", "Lote terminado. Recogiendo resultados…", True)
+        while True:
+            antes = len(vistos)
+            try:
+                # Los resultados llegan en cualquier orden: se emparejan por custom_id.
+                if not self._apuntar_resultados(por_id, vistos, ciclo, cb):
+                    return  # no se puede escribir en disco: el lote sigue en el servidor y el resto se recoge al reanudar
+                break
+            except Exception as error:
+                # Bajar los resultados no cuesta nada, así que repetirlo nunca duplica un cobro: una descarga cortada,
+                # una página de un proxy o un tiempo agotado se repiten con espera. Lo demás sigue la política de siempre.
+                if len(vistos) > antes:
+                    cont = Contadores()  # esta vez se avanzó: los fallos se cuentan sin avance, no en toda una descarga larga
+                if self.manejar_error_de_consulta(error, cb, cont) is not Decision.REINTENTAR:
+                    return  # recogida a medias: se conserva el batch_id y al reanudar se completa
+
+        for msg in self.job.pendientes():
+            if custom_id(msg) not in vistos:
+                self.marcar_fallo(msg, "El lote no devolvió resultado para esta orden.", cb, "missing", guardar=False)
+        logger.info("Lote %s recogido (servidor %s)", self.job.job_id, self.job.batch_id)
+        self.job.batch_id = ""
+        if self.punto_de_control(cb):
+            self._comprobar_tope(cb)  # ahora que está todo pagado y guardado
+
+    def _apuntar_resultados(self, por_id: dict, vistos: set, ciclo: int, cb: Callbacks) -> bool:
+        """Recorre los resultados del servidor y apunta los que faltan. False si hay que dejar de recoger (el disco no admite más).
+
+        El estado del lote y el gasto se escriben cada cierto número de resultados y, pase lo que pase (un fallo de la
+        descarga, Ctrl+C), con lo que se haya apuntado hasta ese momento.
+        """
+        sin_guardar = 0
+        ultimo = time.monotonic()
+        cada = max(RESULTADOS_ENTRE_PUNTOS_DE_CONTROL, len(por_id) // 20)
         try:
-            # Los resultados llegan en cualquier orden: se emparejan por custom_id.
             for entrada in self.client.messages.batches.results(self.job.batch_id):
                 msg = por_id.get(entrada.custom_id)
                 if msg is None:
@@ -3499,27 +4195,27 @@ class BatchEngine(EngineBase):
                 # está resuelto no se vuelve a contabilizar (inflaría el gasto) (Y2).
                 if msg.status != STATUS_PENDING:
                     continue
-                self._aplicar(msg, entrada.result, ciclo, cb)
-        except Exception as error:
-            # Recogida a medias: se conserva el batch_id y al reanudar se completa.
-            self.manejar_error(error, cb, Contadores())
-            return
+                if not self._aplicar(msg, entrada.result, ciclo, cb):
+                    return False
+                sin_guardar += 1
+                if sin_guardar >= cada or time.monotonic() - ultimo > SEGUNDOS_ENTRE_PUNTOS_DE_CONTROL:
+                    guardado, sin_guardar = self.punto_de_control(cb), 0
+                    if not guardado:
+                        return False
+                    ultimo = time.monotonic()
+            return True
+        finally:
+            if sin_guardar:
+                self.punto_de_control(cb)
 
-        for msg in self.job.pendientes():
-            if custom_id(msg) not in vistos:
-                self.marcar_fallo(msg, "El lote no devolvió resultado para esta orden.", cb, "missing")
-        logger.info("Lote %s recogido (servidor %s)", self.job.job_id, self.job.batch_id)
-        self.job.batch_id = ""
-        self.job.save()
-        self._comprobar_tope(cb)  # ahora que está todo pagado y guardado
-
-    def _aplicar(self, msg: JobMessage, resultado: Any, ciclo: int, cb: Callbacks) -> None:
+    def _aplicar(self, msg: JobMessage, resultado: Any, ciclo: int, cb: Callbacks) -> bool:
+        """Apunta el resultado de una orden. False si hay que dejar de recoger (el disco no admite más)."""
         tipo = getattr(resultado, "type", "")
         if tipo == "succeeded":
-            self.registrar_respuesta(
-                msg, resultado.message, ciclo, cb, lote=True, comprobar_tope=False
+            return self.registrar_respuesta(
+                msg, resultado.message, ciclo, cb, lote=True, comprobar_tope=False, guardar_ya=False
             )
-        elif tipo == "errored":
+        if tipo == "errored":
             tipo_error, mensaje = _datos_del_error(resultado)
             detalle = f"La API devolvió un error ({tipo_error or 'desconocido'})."
             if tipo_error.startswith("invalid_request"):
@@ -3530,32 +4226,51 @@ class BatchEngine(EngineBase):
                 categoria = "server"
             if mensaje:
                 detalle += f" ({mensaje})"
-            self.marcar_fallo(msg, detalle, cb, categoria)
+            self.marcar_fallo(msg, detalle, cb, categoria, guardar=False)
         elif tipo == "expired":
-            self.marcar_fallo(msg, "Caducada: el lote superó las 24 h. Reintenta la orden.", cb, "expired")
+            self.marcar_fallo(msg, "Caducada: el lote superó las 24 h. Reintenta la orden.", cb, "expired", guardar=False)
         elif tipo == "canceled":
-            self.marcar_fallo(msg, "Cancelada antes de procesarse.", cb, "canceled")
+            self.marcar_fallo(msg, "Cancelada antes de procesarse.", cb, "canceled", guardar=False)
         else:
-            self.marcar_fallo(msg, f"Resultado desconocido: {tipo!r}", cb, "unknown")
+            self.marcar_fallo(msg, f"Resultado desconocido: {tipo!r}", cb, "unknown", guardar=False)
+        return True
 
     # ------------------------------------------------------------------
 
     def cancelar_lote(self) -> bool:
-        """Cancela en el servidor el lote en curso. Lo ya procesado se cobra y se recoge al reanudar."""
+        """Cancela en el servidor el lote en curso. Lo ya procesado se cobra y se recoge al reanudar.
+
+        Puede llamarse desde otro hilo mientras el motor termina: éste cierra su cliente al acabar, y una cancelación que
+        lo estuviera usando fallaría justo entonces. Por eso, si falla con el cliente del motor, se repite con uno propio.
+        """
         if not self.job.batch_id:
             return False
-        try:
-            if self._client is None:
-                self.inicializar_cliente()
-            self.client.messages.batches.cancel(self.job.batch_id)
-            return True
-        except Exception:
-            logger.exception("No se pudo cancelar el lote %s", self.job.batch_id)
-            return False
+        compartido = self._client
+        propio_primero = compartido is None or _cerrado(compartido)
+        for intento in (0, 1):
+            usar_propio = propio_primero or intento == 1
+            cliente: Any = None
+            try:
+                cliente = self._cliente_nuevo() if usar_propio else compartido
+                cliente.messages.batches.cancel(self.job.batch_id)
+                logger.info("Cancelación pedida para el lote %s", self.job.batch_id)
+                return True
+            except Exception:
+                logger.exception("No se pudo cancelar el lote %s", self.job.batch_id)
+                if usar_propio:
+                    return False
+            finally:
+                cerrar = getattr(cliente, "close", None) if usar_propio else None
+                if callable(cerrar):
+                    try:
+                        cerrar()
+                    except Exception:
+                        pass
+        return False
 
 
 # ============================================================================
-# 17. Clave de API y elección de modelo
+# 18. Clave de API y elección de modelo
 #    (claude_batch_monitor/claves.py)
 # ============================================================================
 #
@@ -3670,7 +4385,7 @@ def guardar_clave(clave: str) -> str:
 
 
 # ============================================================================
-# 18. La cola del modo simple
+# 19. La cola del modo simple
 #    (claude_batch_monitor/cola.py)
 # ============================================================================
 #
@@ -3969,7 +4684,7 @@ def hay_fallidas(job: Optional[Job]) -> bool:
 
 
 # ============================================================================
-# 19. Ejecutar un lote en segundo plano (modo avanzado)
+# 20. Ejecutar un lote en segundo plano (modo avanzado)
 #    (claude_batch_monitor/ejecutor.py)
 # ============================================================================
 #
@@ -4048,6 +4763,30 @@ class EjecutorLote:
         if motor is not None:
             motor.detener()
 
+    def cancelar_lote(self, al_terminar: Optional[Callable[[bool], None]] = None) -> bool:
+        """Para el seguimiento y cancela en el servidor el lote en curso (en segundo plano, sin bloquear a quien llama).
+
+        `al_terminar(ok)` se avisa por `publicar` cuando el servidor ha contestado. False si no hay un lote que cancelar.
+        Primero se para el motor (siempre el mismo desenlace: el lote queda `canceling` y «Reanudar» recoge lo que quede);
+        el motor cierra su cliente al terminar, y `cancelar_lote` del motor lo sabe y usa uno propio si hace falta.
+        """
+        motor = self._motor
+        if motor is None or not hasattr(motor, "cancelar_lote") or not getattr(motor.job, "batch_id", ""):
+            return False
+        motor.detener()
+
+        def trabajo() -> None:
+            ok = False
+            try:
+                ok = bool(motor.cancelar_lote())
+            except Exception:
+                logger.exception("Fallo al cancelar el lote")
+            if al_terminar is not None:
+                self._entregar(al_terminar, ok)
+
+        threading.Thread(target=trabajo, daemon=True, name="cancelar-lote").start()
+        return True
+
     def esperar(self, timeout: Optional[float] = None) -> bool:
         """Espera a que termine el hilo (para el cierre ordenado y las pruebas)."""
         hilo = self._hilo
@@ -4093,7 +4832,7 @@ class EjecutorLote:
 
 
 # ============================================================================
-# 20. Terminal (--cli)
+# 21. Terminal (--cli)
 #    (claude_batch_monitor/cli.py)
 # ============================================================================
 #
@@ -4106,7 +4845,7 @@ class EjecutorLote:
 #     2  detenido por el tope de gasto
 #     3  sin saldo, o límite de gasto de la cuenta de Anthropic
 #     4  incompleto (hora límite o cancelado con Ctrl+C)
-#     5  uso incorrecto (argumentos, fichero, configuración)
+#     5  uso incorrecto (argumentos, fichero, configuración) o ya hay otra copia del programa en marcha
 
 
 EXIT_OK, EXIT_FALLO, EXIT_TOPE, EXIT_SIN_SALDO, EXIT_INCOMPLETO, EXIT_USO = 0, 1, 2, 3, 4, 5
@@ -4168,6 +4907,8 @@ def construir_parser() -> argparse.ArgumentParser:
     e.add_argument("--separador", default=DEFAULT_SEPARATOR, help="Separador de órdenes en texto plano")
     e.add_argument("--reanudar", metavar="JOB_ID", help="Continúa un lote existente")
     e.add_argument("--listar", action="store_true", help="Lista los lotes guardados y sale")
+    e.add_argument("--cancelar-lote", metavar="JOB_ID", dest="cancelar_lote",
+                   help="Cancela en el servidor el lote en curso (lo ya procesado se cobra) y sale")
 
     m = p.add_argument_group("modelo")
     m.add_argument("--modelo", help=f"Por defecto {DEFAULT_MODEL}; al reanudar, el del lote")
@@ -4223,16 +4964,40 @@ class _Salida:
         print(f"ERROR: {texto}", file=sys.stderr, flush=True)
 
 
+def _como_utf8(texto: str) -> str:
+    """El texto de un argumento tal como lo tecleó quien lo escribió.
+
+    Python lee los argumentos con la codificación del sistema. Si es ASCII (una terminal con LANG=C y sin el modo UTF-8
+    de Python), cada carácter no ASCII llega como «sustitutos» y se guardaría como `��`. Aquí se recuperan los bytes
+    originales y se leen como UTF-8. Solo para TEXTOS: una ruta de archivo tiene que quedarse tal como llegó.
+    """
+    if not any("\udc80" <= c <= "\udcff" for c in texto):
+        return texto
+    try:
+        return os.fsencode(texto).decode("utf-8")
+    except UnicodeDecodeError:
+        return texto
+
+
+def _es_un_archivo(valor: str) -> bool:
+    """¿Es `valor` la ruta de un archivo que existe? Un texto largo (una pregunta) no es una ruta y no debe fallar."""
+    if not valor or "\n" in valor or "\x00" in valor:
+        return False
+    try:
+        return Path(valor).is_file()
+    except (OSError, ValueError):  # p. ej. «File name too long» con una pregunta de más de 255 caracteres
+        return False
+
+
 def _texto_o_fichero(valor: Optional[str]) -> str:
     if not valor:
         return ""
-    ruta = Path(valor)
     try:
-        if ruta.is_file():
-            return ruta.read_text(encoding="utf-8-sig").strip()
+        if _es_un_archivo(valor):
+            return Path(valor).read_text(encoding="utf-8-sig").strip()
     except (OSError, UnicodeDecodeError):
         pass
-    return valor
+    return _como_utf8(valor)
 
 
 def _decimal_de_opcion(valor: Optional[str], nombre: str) -> Optional[Decimal]:
@@ -4249,17 +5014,18 @@ def _decimal_de_opcion(valor: Optional[str], nombre: str) -> Optional[Decimal]:
 
 def _ordenes_desde_args(args: argparse.Namespace) -> list[str]:
     origen = args.mensaje
-    if Path(origen).is_file():
+    plantilla = _como_utf8(args.plantilla or "")
+    if _es_un_archivo(origen):
         return leer_ordenes(
             origen, campo=args.campo, separador=args.separador,
-            plantilla=args.plantilla or "", limite=args.limit,
+            plantilla=plantilla, limite=args.limit,
         )
-    ordenes = split_messages(origen, args.separador)
+    ordenes = split_messages(_como_utf8(origen), _como_utf8(args.separador))
     if not ordenes:
         raise ErrorDeEntrada("No se detectó ninguna orden en --mensaje.")
     if args.limit and args.limit > 0:
         ordenes = ordenes[: args.limit]
-    return [aplicar_plantilla(args.plantilla or "", o) for o in ordenes]
+    return [aplicar_plantilla(plantilla, o) for o in ordenes]
 
 
 def _configuracion(args: argparse.Namespace, job: Optional[Job]) -> Configuracion:
@@ -4346,6 +5112,36 @@ def _cliente_para_conteo() -> Optional[Any]:
         return None
 
 
+def _cancelar_lote(args: argparse.Namespace, salida: _Salida) -> int:
+    """`--cancelar-lote`: pide al servidor que cancele el lote en curso de un trabajo guardado."""
+    job = Job.load(args.cancelar_lote)
+    if job is None:
+        salida.error(f"No existe el lote '{args.cancelar_lote}'. Usa --listar para ver los guardados.")
+        return EXIT_USO
+    if not job.batch_id:
+        salida.error(
+            f"El lote {job.job_id} no tiene nada en curso en el servidor de Anthropic "
+            "(ya terminó, o no se envió en modo lote)."
+        )
+        return EXIT_USO
+    try:
+        config = _configuracion(args, job)
+    except (ErrorDeEntrada, ErrorDeExportacion) as e:
+        salida.error(str(e))
+        return EXIT_USO
+    if BatchEngine(config, job).cancelar_lote():
+        salida.info(
+            f"Cancelación pedida para el lote {job.batch_id}. Lo que ya se hubiera procesado se cobra; "
+            f"el resto queda como «cancelada». Para recoger el resultado: --reanudar {job.job_id}"
+        )
+        return EXIT_OK
+    salida.error(
+        f"No se pudo cancelar el lote {job.batch_id} (mira el registro: {LOG_FILE}). "
+        "Comprueba su estado en la consola de Anthropic."
+    )
+    return EXIT_FALLO
+
+
 def main_cli(argv: Optional[list[str]] = None) -> int:
     forzar_utf8_en_salida()
     parser = construir_parser()
@@ -4371,6 +5167,9 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
                 print(f"{d['job_id']}  {d['created_at'][:16]}  {d['modelo']:<22} {d['modo']:<9} "
                       f"{d['completadas']}/{d['total']}  {formatear_usd(d['coste_usd'])}{marca}")
         return EXIT_OK
+
+    if args.cancelar_lote:
+        return _cancelar_lote(args, salida)
 
     if not args.mensaje and not args.reanudar:
         parser.print_usage(sys.stderr)
@@ -4436,6 +5235,20 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
         salida.info("No queda nada pendiente en ese lote.")
         # Aun así se exporta lo que haya, y se sale como completado.
 
+    # Lo que viene gasta dinero y toca el gasto acumulado: que no lo haga a la vez otra copia del programa.
+    bloqueo = BloqueoDeInstancia()
+    if not bloqueo.adquirir():
+        salida.error(aviso_de_otra_copia(bloqueo.dueno))
+        return EXIT_USO
+    try:
+        return _ejecutar_lote(args, salida, config, job, textos, est)
+    finally:
+        bloqueo.liberar()
+
+
+def _ejecutar_lote(
+    args: argparse.Namespace, salida: _Salida, config: Configuracion, job: Optional[Job], textos: list[str], est: Any
+) -> int:
     if job is None:
         job = Job.crear(textos, config)
         job.save()
@@ -4458,6 +5271,11 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
             razon = motor.ejecutar(cb) if job.hay_trabajo() else StopReason.COMPLETED
     except KeyboardInterrupt:
         salida.info("\nDetenido por el usuario. El lote queda guardado.")
+        if job.modo == "lote" and job.batch_id:
+            salida.info(
+                "El lote sigue procesándose en el servidor y se cobrará al terminar. "
+                f"Para cancelarlo: --cancelar-lote {job.job_id}"
+            )
         motor.detener()
         razon = StopReason.STOPPED
 
@@ -4485,7 +5303,7 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
 
 
 # ============================================================================
-# 21. Interfaz: textos en español e inglés
+# 22. Interfaz: textos en español e inglés
 #    (claude_batch_monitor/gui/i18n.py)
 # ============================================================================
 #
@@ -4648,6 +5466,11 @@ TEXTOS: dict[str, dict[str, str]] = {
         "fatal_title": "No se pudo abrir el programa",
         "fatal_text": "Ha ocurrido un error inesperado y el programa se ha cerrado.",
         "fatal_log": "Los detalles están en este archivo (si pides ayuda, adjúntalo):\n{ruta}",
+        # una segunda copia del programa
+        "already_title": "Ya está abierto",
+        "already_text": "Ya hay otra copia de Claude Batch Monitor en marcha{proceso}.\n\n"
+                        "Dos copias a la vez se pisarían el gasto acumulado y el tope de gasto dejaría de proteger. "
+                        "Búscala en la barra de tareas o en la bandeja del sistema, o ciérrala antes de abrir esta.",
     },
     "en": {
         "app_title": "Claude · Question queue",
@@ -4795,6 +5618,12 @@ TEXTOS: dict[str, dict[str, str]] = {
         "fatal_title": "The program could not start",
         "fatal_text": "An unexpected error happened and the program has closed.",
         "fatal_log": "The details are in this file (attach it if you ask for help):\n{ruta}",
+        # a second copy of the program
+        "already_title": "Already open",
+        "already_text": "Another copy of Claude Batch Monitor is already running{proceso}.\n\n"
+                        "Two copies at once would overwrite each other's running spend total and the spend cap "
+                        "would stop protecting you. Look for it in the taskbar or the system tray, or close it "
+                        "before opening this one.",
     },
 }
 
@@ -4865,7 +5694,7 @@ def t(clave: str, **valores: object) -> str:
 
 
 # ============================================================================
-# 22. Interfaz: colores, tipografías y estilos
+# 23. Interfaz: colores, tipografías y estilos
 #    (claude_batch_monitor/gui/estilo.py)
 # ============================================================================
 #
@@ -5060,7 +5889,7 @@ def tarjeta(master: tk.Misc, p: Paleta = PALETA, **kw: object) -> tk.Frame:
 
 
 # ============================================================================
-# 23. Interfaz: el icono, dibujado con código
+# 24. Interfaz: el icono, dibujado con código
 #    (claude_batch_monitor/gui/icono.py)
 # ============================================================================
 #
@@ -5139,7 +5968,7 @@ def imagen_pil(tamano: int = 64):
 
 
 # ============================================================================
-# 24. Interfaz: ventanas y paneles comunes
+# 25. Interfaz: ventanas y paneles comunes
 #    (claude_batch_monitor/gui/comun.py)
 # ============================================================================
 #
@@ -5269,7 +6098,7 @@ def avisar_de_errores_inesperados(root: tk.Misc, segundos_sin_repetir: float = 3
 
 
 # ============================================================================
-# 25. Interfaz: puente entre hilos
+# 26. Interfaz: puente entre hilos
 #    (claude_batch_monitor/gui/bridge.py)
 # ============================================================================
 #
@@ -5346,7 +6175,7 @@ class UiBridge:
 
 
 # ============================================================================
-# 26. Interfaz: icono en la bandeja del sistema (opcional)
+# 27. Interfaz: icono en la bandeja del sistema (opcional)
 #    (claude_batch_monitor/gui/tray.py)
 # ============================================================================
 #
@@ -5422,7 +6251,7 @@ class BandejaDelSistema:
 
 
 # ============================================================================
-# 27. Interfaz: respuestas con formato
+# 28. Interfaz: respuestas con formato
 #    (claude_batch_monitor/gui/formato.py)
 # ============================================================================
 #
@@ -5675,7 +6504,7 @@ def mostrar_texto_con_formato(caja: tk.Text, texto: str, p: Any, fuentes: Any, c
 
 
 # ============================================================================
-# 28. Interfaz avanzada: ventanas secundarias
+# 29. Interfaz avanzada: ventanas secundarias
 #    (claude_batch_monitor/gui/dialogos.py)
 # ============================================================================
 #
@@ -5891,7 +6720,7 @@ class DialogoLotes(Modal):
 
 
 # ============================================================================
-# 29. Modo simple
+# 30. Modo simple
 #    (claude_batch_monitor/gui/simple.py)
 # ============================================================================
 #
@@ -5904,6 +6733,7 @@ class DialogoLotes(Modal):
 
 TOPE_INICIAL = Decimal("2")
 MAX_TOKENS_INICIAL = 8000
+INTERVALO_DE_REPINTADO_MS = 60  # lo que llega por streaming se pinta como mucho 16 veces por segundo
 
 
 def formatear_tiempo(segundos: float) -> str:
@@ -6220,6 +7050,7 @@ class SimpleApp:
 
         self._filas: dict[int, str] = {}
         self._parcial: dict[int, str] = {}
+        self._repintado_pendiente = False
         self._seleccion_auto = True
         self._placeholder = False
         self._banner_fijo = False
@@ -6567,8 +7398,21 @@ class SimpleApp:
 
     def on_delta(self, msg_id: int, texto: str) -> None:
         self._parcial[msg_id] = self._parcial.get(msg_id, "") + texto
-        if self._seleccionada() == msg_id:
-            self._escribir_respuesta(self._parcial[msg_id])
+        if not self._repintado_pendiente:
+            self._repintado_pendiente = True
+            self._luego(INTERVALO_DE_REPINTADO_MS, self._repintar_parcial)
+
+    def _repintar_parcial(self) -> None:
+        """Pinta lo recibido hasta ahora. Los trozos que llegan en un instante se juntan en un solo repintado.
+
+        Con un repintado por trozo, una respuesta larga sin saltos de línea dejaba la ventana sin responder mientras
+        llegaba: tkinter vuelve a trazar la línea entera en cada inserción (con 6 KB en una línea, 7 ms por trozo y
+        subiendo).
+        """
+        self._repintado_pendiente = False
+        elegida = self._seleccionada()
+        if elegida is not None and elegida in self._parcial:  # si ya terminó, `on_orden` pintó la definitiva
+            self._escribir_respuesta(self._parcial[elegida])
 
     def on_gasto(self, usd: Decimal) -> None:
         self._refrescar_gasto()
@@ -6936,7 +7780,7 @@ def ejecutar_simple(config: Optional[Configuracion] = None) -> Optional[str]:
 
 
 # ============================================================================
-# 30. Modo avanzado
+# 31. Modo avanzado
 #    (claude_batch_monitor/gui/app.py)
 # ============================================================================
 #
@@ -8007,10 +8851,31 @@ class AppAvanzada:
     def detener(self) -> None:
         if not (self._ocupado or self.ejecutor.activo):
             return
+        job = self.job
+        if job is not None and job.modo == "lote" and job.batch_id and self._confirmar(
+                "Detener el lote",
+                "Este lote ya está en los servidores de Anthropic y sigue procesándose aunque dejes de esperar "
+                "o cierres el programa; se cobrará al terminar.\n\n"
+                "¿Quieres cancelarlo también allí? Lo que ya se haya procesado se cobra; el resto, no.\n\n"
+                "Sí = cancelar el lote\n"
+                "No = solo dejar de esperar: podrás reanudar, y si luego quieres cancelarlo, pulsa Detener otra vez"):
+            if self.ejecutor.cancelar_lote(self._lote_cancelado):
+                self.var_estado.set("Estado: cancelando el lote en el servidor…")
+                self._log("Cancelación pedida al servidor. Lo ya procesado se cobra; el resto quedará como «cancelada».")
+                self._habilitar(self.boton_detener, False)
+                return
         self.ejecutor.detener()
         self.var_estado.set("Estado: cancelando (termino la petición en curso)…")
         self._log("Parada pedida. Se termina la petición en curso y no se envía ninguna más.")
         self._habilitar(self.boton_detener, False)
+
+    def _lote_cancelado(self, ok: bool) -> None:
+        if ok:
+            self._log("El servidor aceptó la cancelación. Pulsa «Reanudar» para recoger lo que se llegó a procesar.")
+        else:
+            self._log("No se pudo cancelar el lote en el servidor. Compruébalo en la consola de Anthropic.")
+            self._aviso("Cancelar el lote", "No se pudo cancelar el lote en el servidor.\n\n"
+                        "Compruébalo en la consola de Anthropic (Batches); puede seguir procesándose y cobrándose.")
 
     # ------------------------------------------------------------------
     # Pantalla durante el lote
@@ -8402,11 +9267,14 @@ def ejecutar_avanzada(config: Optional[Configuracion] = None) -> Optional[str]:
 
 
 # ============================================================================
-# 31. Abrir la interfaz
+# 32. Abrir la interfaz
 #    (claude_batch_monitor/gui/__init__.py)
 # ============================================================================
 #
 # Interfaces gráficas (tkinter): modo simple y modo avanzado.
+
+
+EXIT_YA_ABIERTO = 5  # el mismo código de «uso incorrecto» de la terminal
 
 
 def _activar_dpi_alto() -> None:
@@ -8433,6 +9301,23 @@ def modo_pedido(argv: list[str]) -> Optional[str]:
     return None
 
 
+def _avisar_de_otra_copia(dueno: str) -> None:
+    """Dice, con una ventana (no todo el mundo ve la consola), que ya hay otra copia abierta."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    fijar_idioma(ConfigManager.cargar().idioma)
+    texto = t("already_text", proceso=f" (PID {dueno})" if dueno else "")
+    print(texto, file=sys.stderr)
+    try:
+        raiz = tk.Tk()
+        raiz.withdraw()
+        messagebox.showwarning(t("already_title"), texto, parent=raiz)
+        raiz.destroy()
+    except tk.TclError:
+        pass  # sin pantalla: ya se imprimió
+
+
 def abrir_interfaz(argv: Optional[list[str]] = None) -> int:
     """Abre la interfaz y alterna entre los dos modos mientras la persona lo pida.
 
@@ -8441,6 +9326,17 @@ def abrir_interfaz(argv: Optional[list[str]] = None) -> int:
     """
     import tkinter as tk
 
+    bloqueo = BloqueoDeInstancia()
+    if not bloqueo.adquirir():
+        _avisar_de_otra_copia(bloqueo.dueno)
+        return EXIT_YA_ABIERTO
+    try:
+        return _abrir(argv, tk)
+    finally:
+        bloqueo.liberar()
+
+
+def _abrir(argv: Optional[list[str]], tk: Any) -> int:
     modo = modo_pedido(list(argv or [])) or ConfigManager.cargar().interfaz
     _activar_dpi_alto()
     try:
@@ -8465,7 +9361,7 @@ def abrir_interfaz(argv: Optional[list[str]] = None) -> int:
 
 
 # ============================================================================
-# 32. Instalar la librería de Anthropic si falta
+# 33. Instalar la librería de Anthropic si falta
 #    (claude_batch_monitor/instalacion.py)
 # ============================================================================
 #
@@ -8787,7 +9683,7 @@ def resolver_falta_de_la_libreria(terminal: bool) -> int:
 
 
 # ============================================================================
-# 33. Arranque
+# 34. Arranque
 #    (claude_batch_monitor/__main__.py)
 # ============================================================================
 #
@@ -8797,7 +9693,7 @@ def resolver_falta_de_la_libreria(terminal: bool) -> int:
 # Con cualquiera de estas opciones se entiende que se quiere la terminal, aunque
 # se olvide `--cli`: abrir una ventana en un servidor sin pantalla no ayuda a nadie.
 _OPCIONES_DE_TERMINAL = {
-    "--cli", "--mensaje", "--reanudar", "--listar", "--dry-run", "--version", "--json", "--help", "-h",
+    "--cli", "--mensaje", "--reanudar", "--cancelar-lote", "--listar", "--dry-run", "--version", "--json", "--help", "-h",
 }
 
 

@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 from decimal import Decimal as D
 
@@ -348,6 +349,8 @@ class TestPuntoDeEntrada:
         assert punto_de_entrada._es_terminal(["--mensaje", "x"])
         assert punto_de_entrada._es_terminal(["--reanudar=abc"])
         assert punto_de_entrada._es_terminal(["--dry-run"])
+        assert punto_de_entrada._es_terminal(["--cancelar-lote", "abc"])
+        assert punto_de_entrada._es_terminal(["--cancelar-lote=abc"])
         assert not punto_de_entrada._es_terminal([])
         assert not punto_de_entrada._es_terminal(["--avanzado"])
 
@@ -458,3 +461,38 @@ class TestPuntoDeEntrada:
         monkeypatch.setattr(gui, "abrir_interfaz", lambda argv: llamado.append(argv) or 0)
         pytest.importorskip("tkinter")
         assert punto_de_entrada.main([]) == 0 and llamado == [[]]
+
+
+class TestTextoLiteralComoArgumento:
+    """`--mensaje` admite un texto o la ruta de un archivo; un texto largo NO es una ruta y no debe hacer fallar nada."""
+
+    def test_una_pregunta_de_mas_de_255_caracteres_no_se_toma_por_un_nombre_de_archivo(self, capsys, cliente):
+        larga = "¿Puedes explicarme con mucho detalle y con ejemplos cómo funciona esto? " * 8
+        assert len(larga) > 300
+        codigo, out, err = correr(capsys, "--mensaje", larga, "--dry-run")
+        assert codigo == 0, err
+        assert "Órdenes" in out or "órdenes" in out
+
+    def test_una_pregunta_larga_se_envia_entera(self, capsys, cliente):
+        larga = "palabra " * 400
+        codigo, _, err = correr(capsys, "--mensaje", larga, "--silencioso")
+        assert codigo == 0, err
+        assert cliente["cliente"].messages.llamadas == 1
+
+    def test_con_saltos_de_linea_o_nulos_tampoco(self, capsys, cliente):
+        assert correr(capsys, "--mensaje", "uno\n---\ndos", "--dry-run")[0] == 0
+
+    def test_un_argumento_con_sustitutos_se_recupera_como_utf8(self):
+        # Lo que Python entrega cuando la codificación del sistema es ASCII y se teclea «¿Qué?».
+        recibido = os.fsdecode("¿Qué?".encode()) if sys.getfilesystemencoding().lower() == "ascii" else \
+            "¿Qué?".encode().decode("ascii", "surrogateescape")
+        assert any("\udc80" <= c <= "\udcff" for c in recibido)
+        assert cli._como_utf8(recibido) == "¿Qué?"
+
+    def test_un_texto_normal_o_con_bytes_que_no_son_utf8_no_se_toca_ni_revienta(self):
+        assert cli._como_utf8("¿Qué?") == "¿Qué?" and cli._como_utf8("") == ""
+        latin1 = "caf\xe9".encode("latin-1").decode("ascii", "surrogateescape")
+        assert cli._como_utf8(latin1) == latin1
+
+    def test_una_ruta_con_sustitutos_se_deja_como_llego(self):
+        assert cli._es_un_archivo("x" * 5000) is False and cli._es_un_archivo("a\x00b") is False

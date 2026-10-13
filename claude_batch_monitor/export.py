@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -36,7 +37,11 @@ def leer_respuesta(job: Job, msg_id: int, ciclo: int) -> str:
     try:
         contenido = ruta.read_text(encoding="utf-8")
     except OSError:
-        return ""
+        # Una respuesta pagada que no se pudo escribir en disco se conserva en memoria.
+        guardada = getattr(job, "respuestas_sin_guardar", {}).get(msg_id)
+        if not guardada or guardada[0] != ciclo:
+            return ""
+        contenido = guardada[1]
     _, _, respuesta = contenido.partition(MARCA_RESPUESTA)
     return respuesta.strip()
 
@@ -70,6 +75,23 @@ def exportar(
     return destino
 
 
+_EMPIEZA_COMO_FORMULA = ("=", "+", "-", "@", "\t", "\r")
+_ES_UN_NUMERO = re.compile(r"[+-]?(\d+[.,]?\d*|[.,]\d+)")
+
+
+def neutralizar_formula(texto: str) -> str:
+    """Evita que una hoja de cálculo ejecute como fórmula una celda de texto («inyección de CSV»).
+
+    Excel, LibreOffice y Google Sheets interpretan como fórmula lo que empieza por `=`, `+`, `-` o `@`: una
+    respuesta (o una pregunta sacada de un fichero ajeno) como `=HYPERLINK("http://…", "pulsa")` podría
+    enviar datos de la hoja a un tercero. Se le antepone un apóstrofo, que la hoja trata como «esto es texto».
+    Los números sueltos (`-5`, `+3,5`) no se tocan: no son fórmulas.
+    """
+    if texto.startswith(_EMPIEZA_COMO_FORMULA) and not _ES_UN_NUMERO.fullmatch(texto.strip()):
+        return "'" + texto
+    return texto
+
+
 def _csv(job: Job, destino: Path, ciclo: int) -> None:
     # utf-8-sig para que Excel en Windows detecte el UTF-8 y no rompa las tildes.
     with open(destino, "w", encoding="utf-8-sig", newline="") as handle:
@@ -99,10 +121,10 @@ def _csv(job: Job, destino: Path, ciclo: int) -> None:
                     f"{msg.coste_usd:.6f}",
                     msg.latency_ms,
                     "sí" if msg.truncated else "no",
-                    msg.error_type,
-                    msg.detalle,
-                    msg.text,
-                    leer_respuesta(job, msg.id, ciclo),
+                    neutralizar_formula(msg.error_type),
+                    neutralizar_formula(msg.detalle),
+                    neutralizar_formula(msg.text),
+                    neutralizar_formula(leer_respuesta(job, msg.id, ciclo)),
                 ]
             )
 

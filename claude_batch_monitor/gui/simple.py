@@ -54,6 +54,7 @@ from .i18n import fijar_idioma, t
 
 TOPE_INICIAL = Decimal("2")
 MAX_TOKENS_INICIAL = 8000
+INTERVALO_DE_REPINTADO_MS = 60  # lo que llega por streaming se pinta como mucho 16 veces por segundo
 
 
 def formatear_tiempo(segundos: float) -> str:
@@ -370,6 +371,7 @@ class SimpleApp:
 
         self._filas: dict[int, str] = {}
         self._parcial: dict[int, str] = {}
+        self._repintado_pendiente = False
         self._seleccion_auto = True
         self._placeholder = False
         self._banner_fijo = False
@@ -717,8 +719,21 @@ class SimpleApp:
 
     def on_delta(self, msg_id: int, texto: str) -> None:
         self._parcial[msg_id] = self._parcial.get(msg_id, "") + texto
-        if self._seleccionada() == msg_id:
-            self._escribir_respuesta(self._parcial[msg_id])
+        if not self._repintado_pendiente:
+            self._repintado_pendiente = True
+            self._luego(INTERVALO_DE_REPINTADO_MS, self._repintar_parcial)
+
+    def _repintar_parcial(self) -> None:
+        """Pinta lo recibido hasta ahora. Los trozos que llegan en un instante se juntan en un solo repintado.
+
+        Con un repintado por trozo, una respuesta larga sin saltos de línea dejaba la ventana sin responder mientras
+        llegaba: tkinter vuelve a trazar la línea entera en cada inserción (con 6 KB en una línea, 7 ms por trozo y
+        subiendo).
+        """
+        self._repintado_pendiente = False
+        elegida = self._seleccionada()
+        if elegida is not None and elegida in self._parcial:  # si ya terminó, `on_orden` pintó la definitiva
+            self._escribir_respuesta(self._parcial[elegida])
 
     def on_gasto(self, usd: Decimal) -> None:
         self._refrescar_gasto()

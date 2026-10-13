@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from . import paths
 from .config import a_decimal
-from .parsing import DEFAULT_SEPARATOR
+from .parsing import DEFAULT_SEPARATOR, limpiar_sustitutos
 from .paths import logger, write_atomic
 from .pricing import normalizar_id
 
@@ -52,6 +52,9 @@ class JobMessage:
     latency_ms: int = 0
     detalle: str = ""
     error_type: str = ""  # categoría legible por máquina: refusal, auth, server…
+
+    def __post_init__(self) -> None:
+        self.text = limpiar_sustitutos(self.text)
 
     def a_dict(self) -> dict:
         return {
@@ -114,6 +117,16 @@ class Job:
         self.modo = modo
         self.system_prompt = system_prompt
         self.batch_id = batch_id  # id del lote en el servidor (modo lote)
+        # Un envío de lote que pudo llegar al servidor sin que nos llegara su respuesta (tiempo agotado, corte, programa
+        # cerrado a mitad): desde cuándo y cuántas órdenes. Mientras esté puesto, antes de enviar se busca ese lote.
+        self.envio_incierto_desde = ""
+        self.envio_incierto_ordenes = 0
+        # El lote más reciente de la cuenta justo antes de intentarlo ("" = ninguno; None = no se pudo mirar): lo que
+        # aparezca por delante en la lista de lotes lo creó el envío (o alguien más), no es anterior.
+        self.envio_incierto_tras: Optional[str] = None
+        # Respuestas ya pagadas que no se pudieron escribir en disco (disco lleno, sin permisos…): se guardan en
+        # memoria para poder verlas, copiarlas o exportarlas mientras el programa siga abierto. No se persisten.
+        self.respuestas_sin_guardar: dict[int, tuple[int, str]] = {}  # orden -> (ciclo, contenido del fichero)
         self.etiqueta = etiqueta  # "cola" = la cola del modo simple; "" = un lote normal
         self.ciclos_completados = 0
         self.messages: list[JobMessage] = [
@@ -160,12 +173,16 @@ class Job:
             "modo": self.modo,
             "system_prompt": self.system_prompt,
             "batch_id": self.batch_id,
+            "envio_incierto_desde": self.envio_incierto_desde,
+            "envio_incierto_ordenes": self.envio_incierto_ordenes,
+            "envio_incierto_tras": self.envio_incierto_tras,
             "etiqueta": self.etiqueta,
             "ciclos_completados": self.ciclos_completados,
             "messages": [m.a_dict() for m in list(self.messages)],
         }
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Escribe el lote en disco. False si no se pudo: quien gasta debe enterarse."""
         with self._save_lock:
             try:
                 write_atomic(
@@ -173,6 +190,8 @@ class Job:
                 )
             except Exception:
                 logger.exception("No se pudo guardar el Job %s", self.job_id)
+                return False
+            return True
 
     @classmethod
     def load(cls, job_id: str) -> Optional[Job]:
@@ -193,6 +212,10 @@ class Job:
                 etiqueta=data.get("etiqueta", "") or "",
             )
             job.ciclos_completados = int(data.get("ciclos_completados", 0))
+            job.envio_incierto_desde = str(data.get("envio_incierto_desde", "") or "")
+            job.envio_incierto_ordenes = max(0, int(data.get("envio_incierto_ordenes", 0) or 0))
+            tras = data.get("envio_incierto_tras")
+            job.envio_incierto_tras = None if tras is None else str(tras)
             job.messages = [JobMessage.desde_dict(m) for m in data["messages"]]
             return job
         except Exception:
@@ -275,6 +298,9 @@ class Job:
             m.detalle = ""
             m.error_type = ""
         self.batch_id = ""
+        self.envio_incierto_desde = ""
+        self.envio_incierto_ordenes = 0
+        self.envio_incierto_tras = None
         self.ciclos_completados += 1
         self.save()
 

@@ -123,7 +123,9 @@ def _leer_tabla(path: Path, contenido: str, campo: Optional[str]) -> list[str]:
 
 def _leer_jsonl(path: Path, contenido: str, campo: Optional[str]) -> list[str]:
     ordenes: list[str] = []
-    for n, linea in enumerate(contenido.splitlines(), start=1):
+    # Un JSONL separa las líneas SOLO por `\n`: `splitlines()` también parte por U+2028, U+0085 o \x0b, que pueden ir
+    # dentro de un texto JSON sin escapar y lo dejarían cortado por la mitad.
+    for n, linea in enumerate(contenido.split("\n"), start=1):
         if not linea.strip():
             continue
         try:
@@ -157,7 +159,7 @@ def listar_campos(origen: Union[str, Path]) -> Optional[list[str]]:
         lector = csv.reader(io.StringIO(contenido, newline=""), delimiter=_delimitador(path, contenido))
         cabecera = next(lector, [])
         return [c.strip() for c in cabecera if c.strip()]
-    for linea in contenido.splitlines():
+    for linea in contenido.split("\n"):
         if linea.strip():
             try:
                 obj = json.loads(linea)

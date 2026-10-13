@@ -7,6 +7,7 @@ documentación avisa de que no hay garantía de orden y que hay que emparejar po
 
 import random
 import re
+from datetime import datetime, timezone
 from decimal import Decimal as D
 from types import SimpleNamespace as NS
 
@@ -47,12 +48,20 @@ class FakeBatches:
         self.falla_en = falla_en              # lanzar este error tras N resultados: (n, excepción)
         self.creados, self.cancelados, self.consultas = [], [], 0
         self.errores_al_crear = []
+        self.visibles = []                    # lo que `list()` enseña: los lotes creados, como los ve la cuenta
 
     def create(self, requests):
         if self.errores_al_crear:
             raise self.errores_al_crear.pop(0)
         self.creados.append(requests)
+        self.visibles.append(NS(
+            id="msgbatch_test", created_at=datetime.now(timezone.utc),
+            request_counts=NS(processing=len(requests), succeeded=0, errored=0, canceled=0, expired=0)))
         return NS(id="msgbatch_test")
+
+    def list(self, limit=20):
+        """Del más nuevo al más viejo, como la API."""
+        return iter(reversed(self.visibles))
 
     def retrieve(self, batch_id):
         self.consultas += 1
@@ -235,12 +244,33 @@ class TestReanudacion:
         assert job.coste_total() == D("0.0035")                     # 2 órdenes, no 3
         assert motor.estado.gasto_acumulado_usd == D("0.0035")
 
-    def test_una_recogida_cortada_conserva_el_lote_y_se_completa_despues(self):
+    def test_una_descarga_cortada_una_vez_se_repite_sola_sin_contar_dos_veces(self):
+        corte = anthropic.APIConnectionError(message="reset", request=httpx.Request("POST", "https://x"))
+        corte.__cause__ = httpx.ReadError("se cortó")
+
+        class CortaUnaVez(FakeBatches):
+            cortado = False
+
+            def results(self, batch_id):
+                for i, entrada in enumerate(super().results(batch_id)):
+                    if i == 2 and not self.cortado:
+                        self.cortado = True
+                        raise corte
+                    yield entrada
+
+        b = CortaUnaVez({f"m00000{i}": exito(f"r{i}") for i in (1, 2, 3, 4)})
+        motor, job, _ = preparar(n=4, batches=b)
+        assert motor.ejecutar(Callbacks()) == StopReason.COMPLETED
+        assert job.completed_count() == 4 and job.batch_id == ""
+        assert job.coste_total() == D("0.00175") * 4          # las dos primeras no se cuentan otra vez
+        assert motor.estado.gasto_acumulado_usd == job.coste_total()
+
+    def test_una_recogida_que_no_se_arregla_conserva_el_lote_y_se_completa_despues(self):
         corte = anthropic.APIConnectionError(message="reset", request=httpx.Request("POST", "https://x"))
         corte.__cause__ = httpx.ReadError("se cortó")
         b = FakeBatches({f"m00000{i}": exito(f"r{i}") for i in (1, 2, 3, 4)}, falla_en=(2, corte))
         motor, job, _ = preparar(n=4, batches=b)
-        assert motor.ejecutar(Callbacks()) == StopReason.NETWORK
+        assert motor.ejecutar(Callbacks()) == StopReason.FATAL          # tras repetirla las veces permitidas
         assert job.batch_id == "msgbatch_test"            # se conserva para completar la recogida
         hechas = job.completed_count()
         assert hechas == 2
@@ -268,6 +298,119 @@ class TestReanudacion:
         assert motor.ejecutar(Callbacks(error=errores.append)) == StopReason.FATAL
         assert job.batch_id == "" and "29 días" in errores[0]
         assert job.completed_count() == 0 and len(job.pendientes()) == 3
+
+
+def _corte():
+    e = anthropic.APIConnectionError(message="reset", request=httpx.Request("GET", "https://x"))
+    e.__cause__ = httpx.ReadError("se cortó")
+    return e
+
+
+def _tiempo_agotado():
+    return anthropic.APITimeoutError(request=httpx.Request("GET", "https://x"))   # sin causa: la petición ya había salido
+
+
+class FallaAlVerElEstado(FakeBatches):
+    def __init__(self, resultados, fallos, **kw):
+        super().__init__(resultados, **kw)
+        self.fallos = list(fallos)
+
+    def retrieve(self, batch_id):
+        if self.fallos:
+            raise self.fallos.pop(0)
+        return super().retrieve(batch_id)
+
+
+class TestConsultasDeSoloLectura:
+    """Ver el estado de un lote o bajar sus resultados no cuesta nada: un corte o un tiempo agotado se repiten."""
+
+    @staticmethod
+    def _reanudar(n, **kw):
+        motor, job, b = preparar(n=n, max_error_attempts=8, **kw)
+        job.batch_id = "msgbatch_previo"
+        job.save()
+        return motor, job, b
+
+    def _lote(self, fallos, n=3):
+        job_ids = [f"m{i:06d}" for i in range(1, n + 1)]
+        return FallaAlVerElEstado({cid: exito(f"r{cid}") for cid in job_ids}, fallos)
+
+    def test_un_corte_al_ver_el_estado_se_repite_en_vez_de_parar(self):
+        motor, job, b = self._reanudar(3, batches=self._lote([_corte(), _corte()]))
+        assert motor.ejecutar(Callbacks()) == StopReason.COMPLETED
+        assert job.completed_count() == 3 and b.creados == []          # y no se envió otro lote
+
+    def test_mas_de_tres_tiempos_agotados_seguidos_no_paran_el_trabajo(self):
+        motor, job, _ = self._reanudar(3, batches=self._lote([_tiempo_agotado()] * 5))
+        assert motor.ejecutar(Callbacks()) == StopReason.COMPLETED
+        assert job.completed_count() == 3
+
+    def test_si_no_se_arregla_nunca_para_con_el_lote_conservado(self):
+        motor, job, _ = preparar(n=3, max_error_attempts=3, batches=self._lote([_corte()] * 50))
+        job.batch_id = "msgbatch_previo"
+        job.save()
+        errores = []
+        assert motor.ejecutar(Callbacks(error=errores.append)) == StopReason.FATAL
+        assert job.batch_id == "msgbatch_previo" and job.completed_count() == 0
+        assert "Máximo de errores" in errores[-1]
+
+    def test_un_5xx_y_un_429_siguen_su_politica_de_siempre(self):
+        resp = lambda c: httpx.Response(c, request=httpx.Request("GET", "https://x"))  # noqa: E731
+        fallos = [anthropic.InternalServerError("x", response=resp(500), body=None),
+                  anthropic.RateLimitError("x", response=resp(429), body=None)]
+        motor, job, _ = self._reanudar(3, batches=self._lote(fallos))
+        assert motor.ejecutar(Callbacks()) == StopReason.COMPLETED
+
+    def test_una_clave_invalida_no_se_reintenta(self):
+        resp = httpx.Response(401, request=httpx.Request("GET", "https://x"))
+        fallos = [anthropic.AuthenticationError("x", response=resp, body=None)]
+        motor, job, _ = self._reanudar(3, batches=self._lote(fallos))
+        assert motor.ejecutar(Callbacks()) == StopReason.FATAL and job.batch_id == "msgbatch_previo"
+
+    def test_una_descarga_que_avanza_cada_vez_no_agota_los_reintentos(self):
+        """Los fallos que cuentan son los que no avanzan: una descarga larga puede cortarse varias veces y terminar."""
+        class Avanza(FakeBatches):
+            intento = 0
+
+            def results(self, batch_id):
+                self.intento += 1
+                for i, entrada in enumerate(super().results(batch_id)):
+                    if i == 2 * self.intento:
+                        raise _corte()
+                    yield entrada
+
+        b = Avanza({f"m00000{i}": exito(f"r{i}") for i in range(1, 7)}, desordenar=False)
+        motor, job, _ = preparar(n=6, batches=b, max_error_attempts=2)
+        assert motor.ejecutar(Callbacks()) == StopReason.COMPLETED
+        assert job.completed_count() == 6 and b.intento == 3
+        assert motor.estado.gasto_acumulado_usd == job.coste_total()   # sin contar nada dos veces
+
+    def test_una_descarga_que_no_avanza_si_agota_los_reintentos(self):
+        class SiempreIgual(FakeBatches):
+            def results(self, batch_id):
+                for i, entrada in enumerate(super().results(batch_id)):
+                    if i == 2:
+                        raise _corte()
+                    yield entrada
+
+        b = SiempreIgual({f"m00000{i}": exito(f"r{i}") for i in range(1, 7)}, desordenar=False)
+        motor, job, _ = preparar(n=6, batches=b, max_error_attempts=3)
+        assert motor.ejecutar(Callbacks()) == StopReason.FATAL
+        assert job.batch_id == "msgbatch_test" and job.completed_count() == 2
+
+    def test_una_descarga_con_tiempo_agotado_se_repite(self):
+        class Lenta(FakeBatches):
+            lenta = 3
+
+            def results(self, batch_id):
+                if self.lenta:
+                    self.lenta -= 1
+                    raise _tiempo_agotado()
+                yield from super().results(batch_id)
+
+        b = Lenta({f"m00000{i}": exito(f"r{i}") for i in (1, 2, 3)})
+        motor, job, _ = preparar(n=3, batches=b, max_error_attempts=8)
+        assert motor.ejecutar(Callbacks()) == StopReason.COMPLETED and job.completed_count() == 3
 
 
 class TestTope:

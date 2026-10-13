@@ -26,6 +26,7 @@ You need an **Anthropic API key** (pay-per-use, from [platform.claude.com](https
 - **Simple mode** for anyone: paste your API key once, type a question, press Enter. Answers stream in live, **formatted** (headings, lists, code, tables); questions pile up in a queue that survives closing the program. Light and dark themes.
 - **Waits instead of failing.** Per-minute limit → waits for the exact time the API asks. Server overloaded → backs off and retries. No internet → keeps trying for up to 10 minutes. Closing the app mid-queue → the pending questions are still there next time.
 - **Stops instead of overspending.** Before every request it estimates the *worst case* and refuses to send it if it would cross your cap. A response that was already paid for is **always saved first**, even if it is the one that hits the cap.
+- **Never pays twice for the same thing.** A connection that drops mid-response, a request that times out, a batch whose creation went unanswered: the program stops or looks first, it never just sends again. A batch is not created twice, even if you close the program in the middle of sending it: before sending another it looks for the one that may already exist.
 - **Says why it stopped** when waiting cannot help: out of credit, the account's monthly spend limit (with the date access returns), a rejected key, a model that no longer exists — each with the button that fixes it.
 - **Advanced mode** for bigger jobs: load a `.csv` / `.tsv` / `.jsonl` (one order per row, pick the column), wrap every row in a template, use the **Batches API at half price**, run requests in parallel, estimate the cost first, see/copy/export every answer, resume old batches, loop with a deadline, Telegram and desktop notifications, system-tray background mode.
 - **Command line** (`--cli`) for servers and cron, with meaningful exit codes and `--json` output.
@@ -85,9 +86,12 @@ python3 claude_batch_monitor.py --cli --mensaje datos.csv --campo texto --planti
 # Pick up an interrupted run
 python3 claude_batch_monitor.py --cli --listar
 python3 claude_batch_monitor.py --cli --reanudar 1a2b3c4d
+
+# A batch keeps running (and billing) on Anthropic's side if you just stop waiting: cancel it
+python3 claude_batch_monitor.py --cli --cancelar-lote 1a2b3c4d
 ```
 
-Exit codes: `0` done · `1` failure/network · `2` spend cap · `3` no credit / account limit · `4` incomplete (stopped or deadline) · `5` bad usage.
+Exit codes: `0` done · `1` failure/network · `2` spend cap · `3` no credit / account limit · `4` incomplete (stopped or deadline) · `5` bad usage, or another copy of the program is already running.
 *The command-line flags and the advanced window are in Spanish for now; the simple mode is bilingual.*
 
 ## Safety
@@ -95,21 +99,37 @@ Exit codes: `0` done · `1` failure/network · `2` spend cap · `3` no credit / 
 - **Spend cap on by default** ($2 in simple mode, $5 elsewhere; `0` disables it). Prices come from a built-in catalogue, the unknown-model fallback is the *expensive* price, and you can override them.
 - **Your key never touches a file.** It lives in the OS keyring (or an environment variable, or memory for the session) — never in `config.json`, the repo, logs or exports. It is sent only to Anthropic.
 - **Everything is on your disk:** `%APPDATA%\ClaudeMonitor` (Windows), `~/Library/Application Support/ClaudeMonitor` (macOS) or `~/.config/ClaudeMonitor` (Linux); override with `CLAUDE_MONITOR_HOME`. Finished batches are removed after 30 days; batches with pending work never are.
-- **No duplicate charges:** if the connection drops *mid-response* it stops instead of resending, because the server may already have billed that request.
+- **No duplicate charges:** if the connection drops *mid-response* it stops instead of resending, because the server may already have billed that request. A request that timed out after being sent counts against the cap as possible spend. Creating a batch is written down *before* it is attempted, and before any retry the account's later batches are searched for the one that may already exist. Checks that cost nothing (a batch's status, the list of batches, downloading results) are simply retried when the connection drops.
+- **One copy at a time** per data folder (a second window or terminal run is refused): two copies would overwrite each other's running spend total and the cap would stop protecting you.
+- **A full or read-only disk stops the run at once**, and the answers you already paid for stay on screen (copy / export) until they can be written.
+- **Spreadsheet-safe CSV:** text cells that start with `=`, `+`, `-` or `@` are prefixed with an apostrophe so Excel/Calc do not run them as formulas.
 
 ## Status
 
-Beta. The engine is covered by 1,000+ automated tests, including runs against the real `anthropic` SDK (0.69 and 1.x) with a simulated server, on Python 3.9 and 3.12; the same tests also run against the single file. It has **not** yet been exercised against the live API in long production runs, the Windows/macOS executables are built by CI but not hand-tested, running the single file on Windows and macOS has not been tried by hand either, and the windows were only exercised under a virtual display on Linux. Start with `--limit 2` (or *Solo las primeras 2* in advanced mode) before pointing it at a big file. See [REVIEW.md](REVIEW.md) for what changed from the original single-file script and why, and [CHANGELOG.md](CHANGELOG.md).
+Beta. What has been tried: 1,480 automated tests, including the real `anthropic` SDK (0.69 and 1.x) against a **simulated Anthropic server over real sockets** — rate limits, 5xx, cut and reset connections, empty and truncated streams, timeouts, a full disk, closing the program in the middle of sending a batch — plus seeded random failure runs, property-based tests, and real processes (`kill -9`, Ctrl+C, two copies at once, the single file and the package both). All of it passes on Python 3.9, 3.10, 3.11, 3.12 and 3.13, and the same suite also runs against the single file. What has **not** been done: long runs against the live API; the Windows/macOS executables are built by CI but not hand-tested, nor is the single file on those systems; the windows were only exercised under a virtual display on Linux.
+
+Known limits, stated plainly:
+- If a connection drops *after* the server processed a request, that one request may be billed without the program ever seeing it (it stops and says so).
+- A request abandoned after a timeout counts as possible spend for the rest of *that run*; closing and reopening the program forgets it (Anthropic's invoice is the reference).
+- Before sending a batch the program notes the newest batch in your account, and looks for its own only among later ones. If that look-up could not be read at sending time, it falls back to dates and trusts this computer's clock to be within ten minutes of Anthropic's. A batch the server is still in the middle of creating at that very moment cannot be seen, which is why a retry waits first.
+- If the program is killed at the very instant it writes a checkpoint while collecting a big batch, the running spend total can count up to 5 % of that batch twice (always high, never low).
+- Anthropic's own docs note a batch can go slightly over a workspace spend limit, so this program's cap is checked *before* sending, with the worst case of the whole batch; and the cap counts what this program sent, not other tools using the same key.
+- CSV exports prefix cells that start with `=`, `+`, `-` or `@` with an apostrophe (spreadsheet safety); a program reading the answers should use the JSONL export, which is unmodified.
+
+Start with `--limit 2` (or *Solo las primeras 2* in advanced mode) before pointing it at a big file. See [REVIEW.md](REVIEW.md) for what changed from the original single-file script and why, [CHANGELOG.md](CHANGELOG.md), and [docs/ROADMAP.md](docs/ROADMAP.md) for similar projects and the ideas they suggest.
 
 ## Develop
 
 ```bash
-pip install -e ".[all]" pytest ruff
+pip install -e ".[all]" pytest hypothesis ruff
 ruff check .
-xvfb-run -a python -m pytest                       # the modules (window tests need a display; on a desktop: python -m pytest)
+xvfb-run -a python -m pytest                       # everything, about 5 minutes (window tests need a display; on a desktop: python -m pytest)
+xvfb-run -a python -m pytest -m "not simulacro"    # the quick part: skips the simulations (simulated server, real processes)
 CBM_ARCHIVO_UNICO=1 xvfb-run -a python -m pytest   # the same tests, against claude_batch_monitor.py
 python tools/build_single_file.py                  # regenerate the single file after editing a module
 ```
+
+The simulations (`tests/servidor_falso.py`) run the real `anthropic` SDK against a small local server that fails on request: add `[[plan:429(2),529,ok]]` to a question and the server answers it with a rate limit, then an overload, then a real answer. That is how new failure modes get a test.
 
 Build the executable for your OS (`pip install pyinstaller`, then `pyinstaller packaging/claude-batch-monitor.spec`); tagging `v*` builds all three on GitHub Actions and opens a **draft** release.
 

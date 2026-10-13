@@ -81,7 +81,7 @@ La barra de abajo cuenta lo que pasa en lenguaje normal: *«La IA ha llegado a s
 - **Solo las primeras N**: prueba de humo con 2 filas antes de lanzar 5 000.
 - **Estimar coste**: tokens y *peor caso* (si cada respuesta llenara `max_tokens`) antes de gastar nada.
 - **Resultados** (con tokens y coste por orden; doble clic para ver y copiar la respuesta completa) y **Actividad** (registro en vivo).
-- **Iniciar lote**, **Reanudar** (se convierte en *Reintentar fallidas* si solo quedan las que fallaron), **Detener**, **Exportar…**, **Lotes anteriores…** (abrir uno guardado para ver, exportar o reanudar) y **Más** (carpeta de respuestas, registro, carpeta de datos).
+- **Iniciar lote**, **Reanudar** (se convierte en *Reintentar fallidas* si solo quedan las que fallaron), **Detener** (en modo lote pregunta si quieres **cancelar también el lote en el servidor**: sigue procesándose y cobrándose aunque dejes de esperar), **Exportar…**, **Lotes anteriores…** (abrir uno guardado para ver, exportar o reanudar) y **Más** (carpeta de respuestas, registro, carpeta de datos).
 
 **Ajustes** (todo se guarda solo y un valor inválido te dice cuál es y por qué, en vez de sustituirlo en silencio)
 - Clave de API y modelo (*Cargar modelos* consulta tu cuenta), esfuerzo de razonamiento, máximo de tokens por respuesta, prompt de sistema y caché de prompt.
@@ -102,17 +102,18 @@ python -m claude_batch_monitor --cli --mensaje datos.csv --campo texto --plantil
        --modo lote --tope-gasto 3 --exportar resultados.csv
 python -m claude_batch_monitor --cli --listar
 python -m claude_batch_monitor --cli --reanudar 1a2b3c4d
+python -m claude_batch_monitor --cli --cancelar-lote 1a2b3c4d   # cancela en el servidor un lote en curso
 ```
 
 | Grupo | Opciones |
 |---|---|
-| Entrada | `--mensaje` (texto o archivo `.txt .md .csv .tsv .jsonl`) · `--campo` (columna) · `--plantilla` · `--limit N` · `--separador` · `--reanudar ID` · `--listar` |
+| Entrada | `--mensaje` (texto o archivo `.txt .md .csv .tsv .jsonl`) · `--campo` (columna) · `--plantilla` · `--limit N` · `--separador` · `--reanudar ID` · `--cancelar-lote ID` · `--listar` |
 | Modelo | `--modelo` · `--system` (texto o archivo) · `--modo inmediato\|lote` · `--max-tokens` · `--esfuerzo low\|medium\|high\|xhigh\|max` · `--sin-cache` · `--concurrencia` |
 | Gasto | `--tope-gasto USD` (5 por defecto, 0 = sin tope) · `--precio-in` · `--precio-out` · `--dry-run` |
 | Tiempos | `--bucle` · `--hora-limite HH:MM` · `--pausa-ciclos` · `--pausa` |
 | Salida | `--exportar ARCHIVO` · `--formato csv\|jsonl\|md\|txt` · `--json` (resumen JSON por stdout, el progreso va a stderr) · `--silencioso` · `--version` |
 
-**Códigos de salida:** `0` completado · `1` fallo, red o terminó con órdenes fallidas · `2` tope de gasto · `3` sin saldo o límite de la cuenta · `4` incompleto (detenido o hora límite) · `5` uso incorrecto. Con `--reanudar` el modo se hereda del lote.
+**Códigos de salida:** `0` completado · `1` fallo, red o terminó con órdenes fallidas · `2` tope de gasto · `3` sin saldo o límite de la cuenta · `4` incompleto (detenido o hora límite) · `5` uso incorrecto, o ya hay otra copia del programa en marcha. Con `--reanudar` el modo se hereda del lote.
 
 Los archivos exportados incluyen `error_type` por orden: `refusal`, `auth`, `bad_request`, `model_not_found`, `not_found`, `too_large`, `server`, `connection`, `max_retries`, `expired`, `canceled`, `missing`, `unexpected`, `other`.
 
@@ -126,8 +127,13 @@ Los archivos exportados incluyen `error_type` por orden: `refusal`, `auth`, `bad
 | **Sin saldo** (402, o 400 «credit balance is too low») | **Para**; botón para abrir la facturación. Lo ya respondido está guardado. |
 | **Servidor saturado / error 5xx / 529** | Reintenta con espera creciente y aleatoria. Solo estos errores cuentan hacia «reintentos por orden». |
 | **Sin conexión a internet** | Espera y reintenta hasta 10 minutos en total; si no vuelve, para y se puede reanudar. |
-| **Conexión cortada a mitad de una respuesta** | **Para** en vez de reenviar: el servidor puede haber cobrado ya esa petición y repetirla la cobraría dos veces. |
-| **Tiempo de espera agotado** | Reintenta (cuenta como error de servidor). |
+| **Conexión cortada a mitad de una respuesta** (también en streaming, o un flujo que termina sin el final del mensaje) | **Para** en vez de reenviar: el servidor puede haber cobrado ya esa petición y repetirla la cobraría dos veces. |
+| **Tiempo de espera agotado** | Reintenta, pero la petición abandonada **cuenta como posible gasto** (el servidor pudo cobrarla) y el reintento va en streaming, que no tiene un tiempo total que agotar. Si una misma orden agota el tiempo 3 veces, **para**. |
+| **Una respuesta «correcta» que no es de la API** (la página de un proxy o de un portal de wifi, un 200 con HTML) | Reintenta con espera: el servidor no llegó a procesar nada. |
+| **Errores 408 y 409** | Se reintentan como los de servidor (el propio SDK de Anthropic hace lo mismo). |
+| **Se envía un lote y no llega la respuesta** (tiempo agotado, corte, 5xx, o cerraste el programa en pleno envío) | **No crea un segundo lote.** Antes de enviar anota cuál es el último lote de tu cuenta y apunta el envío; antes de repetirlo (ahora o al volver a abrir) busca, entre los lotes posteriores a ese, uno del mismo tamaño que no sea de otra tarea. Si está, sigue con ese. Si hay varios candidatos, para y te lo dice. |
+| **Falla una consulta** (ver el estado de un lote, listar los recientes, bajar los resultados): corte, tiempo agotado, 5xx, página de un proxy | **Reintenta con espera** y no cuenta como riesgo de cobro doble: consultar no cuesta nada. Si no se arregla en los reintentos permitidos (los que no avanzan, al bajar resultados), para y el lote **sigue en el servidor** para reanudar. |
+| **Disco lleno, o sin permiso para escribir** | **Para al momento** (seguir sería pagar respuestas que luego se perderían). La respuesta ya pagada sigue en pantalla para copiarla o exportarla y se escribe en disco en cuanto se pueda. |
 | **Clave inválida (401/403)**, **modelo inexistente (404)**, **petición rechazada (400)** | Para con un mensaje que dice qué cambiar. |
 | **Orden demasiado grande (413)** | Esa orden falla; **las demás siguen**. |
 | **El modelo se niega a responder** (`refusal`) | Se marca *Rechazada*; **se cobra** igualmente (es lo que hace la API) y queda guardada. |
@@ -147,10 +153,12 @@ El programa **no** intenta adivinar el reinicio de una suscripción de claude.ai
 ## Datos, privacidad y seguridad
 
 - Todo se guarda en tu equipo, en `%APPDATA%\ClaudeMonitor` (Windows), `~/Library/Application Support/ClaudeMonitor` (macOS) o `~/.config/ClaudeMonitor` (Linux). Se puede cambiar con la variable `CLAUDE_MONITOR_HOME` (útil para una instalación portátil).
-  - `config.json` (ajustes, **sin claves**) · `state.json` (gasto acumulado) · `claude_monitor.log` · `responses/` (un `job_<id>.json` por lote y un `.txt` por respuesta).
+  - `config.json` (ajustes, **sin claves**) · `state.json` (gasto acumulado) · `claude_monitor.log` · `instancia.lock` (el bloqueo de «una sola copia»; solo guarda un número de proceso) · `responses/` (un `job_<id>.json` por lote y un `.txt` por respuesta).
 - Tus preguntas y respuestas viajan **solo** a `api.anthropic.com` (y los avisos, a `api.telegram.org` si configuras Telegram; y la descarga de `anthropic` desde PyPI, si aceptas instalarla). El programa no tiene servidor propio, ni telemetría, ni comprobación de actualizaciones, ni cuentas. Los enlaces (consola, facturación, documentación) se abren en tu navegador solo cuando pulsas.
 - La clave y el token de Telegram **nunca** se escriben en archivos, registros ni exportaciones; los errores de red se registran sin su texto porque la URL de Telegram contiene el token.
 - Los lotes terminados se borran a los 30 días (configurable, 0 = nunca); los que tienen órdenes sin enviar **no se borran jamás**.
+- **Una sola copia a la vez** por carpeta de datos: dos copias se pisarían el gasto acumulado y el tope dejaría de proteger. La segunda avisa y no se abre (en la terminal sale con el código 5). El bloqueo lo suelta el propio sistema si el programa muere, así que no se queda «atascado».
+- Las exportaciones a CSV llevan un apóstrofo delante de las celdas de texto que empiezan por `=`, `+`, `-` o `@`, para que Excel o Calc no las ejecuten como fórmulas.
 - Mientras trabaja, el programa pide al sistema que no se suspenda (Windows: una llamada de Win32; macOS: `caffeinate`; Linux con `systemd`: `systemd-inhibit`).
 - Los demás programas que lanza: `pip install anthropic` (solo si aceptas), `xdg-open` / `open` / `os.startfile` para abrir una carpeta cuando pulsas el botón, y `defaults` / `gsettings` (en Windows, el registro) para saber si tu sistema usa el tema oscuro. Nada más.
 - **No hay código escondido.** El archivo no contiene `exec`, `eval`, `compile` de cadenas, nada decodificado ni descomprimido. Una prueba lo comprueba en cada generación, y otra comprueba que las únicas direcciones web del archivo son las anteriores.
@@ -166,7 +174,18 @@ El programa **no** intenta adivinar el reinicio de una suscripción de claude.ai
 
 **¿Dónde están mis respuestas?** En la ventana, en *Guardar todo…* / *Exportar…* y en la carpeta `responses/`.
 
-**¿Y si pulso *Detener* en mitad de una respuesta?** Termina la petición en curso (para no perder lo que ya se está cobrando) y no envía ninguna más.
+**¿Y si pulso *Detener* en mitad de una respuesta?** Termina la petición en curso (para no perder lo que ya se está cobrando) y no envía ninguna más. En modo lote, el lote ya está en los servidores de Anthropic: *Detener* te pregunta si quieres cancelarlo también allí (lo ya procesado se cobra; lo demás, no).
+
+**¿Puedo abrir dos copias a la vez?** No sobre la misma carpeta de datos (ver arriba). Si de verdad las necesitas, dale a cada una su carpeta con `CLAUDE_MONITOR_HOME`.
+
+**¿Qué no puede garantizar?**
+- Que una respuesta cuya conexión se corta *después* de que el servidor la procesara no se cobre: el programa no puede contar lo que nunca recibió. Por eso para y lo dice, en lugar de reenviar.
+- Que una petición abandonada por tiempo cuente siempre: su peor caso se suma al gasto **durante esa ejecución**, pero no se recuerda si cierras y vuelves a abrir (la factura de Anthropic es la referencia).
+- Que el reloj de tu equipo coincida con el de Anthropic: solo importa si, al enviar un lote, no se pudo leer la lista de tu cuenta; entonces la búsqueda de un lote que quizá ya existe se limita por fecha y se fía de que no difieran más de diez minutos. Y un lote que el servidor aún esté creando justo en ese instante no se ve, por eso antes de reintentar se espera unos segundos.
+- Que el gasto anotado sea exacto si matas el programa en el instante de escribir un punto de control al recoger un lote grande: puede contar dos veces como máximo el 5 % del lote (siempre por exceso, nunca por defecto).
+- Que Anthropic no deje pasarse un poco a un lote del límite de gasto del *workspace*: el tope de este programa se comprueba **antes de enviar**, con el peor caso de todo el lote.
+- Que el tope vea lo que gastan otras herramientas con la misma clave: solo cuenta lo que envía este programa.
+- Que un CSV sirva para leer las respuestas desde otro programa: las celdas que empiezan por `=`, `+`, `-` o `@` llevan un apóstrofo delante (por seguridad al abrirlo en una hoja de cálculo). Para leerlas con un programa, usa la exportación JSONL, que no se modifica.
 
 ## Problemas habituales
 

@@ -852,6 +852,7 @@ class SimpleApp:
             return
         self.config.ruta_claude = ruta
         ConfigManager.guardar(self.config)
+        self.cola.actualizar_config(self.config)   # el siguiente envío ya lo usa
         olvidar_comprobaciones()
         if self.pantalla == "bienvenida":
             self._comprobar_en_bienvenida()

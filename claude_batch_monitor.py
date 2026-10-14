@@ -154,10 +154,10 @@ except ImportError:  # un Python sin tkinter: la terminal funciona y el arranque
 #   31. Interfaz: respuestas con formato                                 línea  8092
 #   32. Interfaz avanzada: ventanas secundarias                          línea  8345
 #   33. Modo simple                                                      línea  8565
-#   34. Modo avanzado                                                    línea  9990
-#   35. Abrir la interfaz                                                línea 11613
-#   36. Instalar la librería de Anthropic si falta                       línea 11707
-#   37. Arranque                                                         línea 12062
+#   34. Modo avanzado                                                    línea  9991
+#   35. Abrir la interfaz                                                línea 11614
+#   36. Instalar la librería de Anthropic si falta                       línea 11708
+#   37. Arranque                                                         línea 12063
 # ============================================================================
 # Para leerlo en el orden en que se ejecuta: 37 (arranque), 33 (modo simple), 17 (motor inmediato).
 
@@ -9354,6 +9354,7 @@ class SimpleApp:
             return
         self.config.ruta_claude = ruta
         ConfigManager.guardar(self.config)
+        self.cola.actualizar_config(self.config)   # el siguiente envío ya lo usa
         olvidar_comprobaciones()
         if self.pantalla == "bienvenida":
             self._comprobar_en_bienvenida()

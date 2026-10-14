@@ -204,6 +204,7 @@ class TestElegirDondeEstaClaudeCode:
         assert not activado(app.boton_usar_plan)
         self._botones(app.boton_comprobar.master)[t("plan_pick")].invoke()
         assert app.config.ruta_claude == elegido and ConfigManager.cargar().ruta_claude == elegido
+        assert app.cola.config.ruta_claude == elegido                # y la cola, que es quien lanza `claude`
         assert bombear(raiz, lambda: app.bienvenida_estado.cget("text") == t("plan_ok"))
         assert activado(app.boton_usar_plan) and comprobar.rutas[-1] == elegido and comprobar.llamadas[-1] is False
 

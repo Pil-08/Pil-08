@@ -79,8 +79,7 @@ TEXTOS: dict[str, dict[str, str]] = {
         # primera vez
         "welcome_title": "Primeros pasos",
         "welcome_text": "Esta aplicación envía tus preguntas a Claude y las guarda en una cola: si hay que "
-                        "esperar (límite de uso, sin conexión…), espera sola y sigue. Para funcionar necesita "
-                        "una clave de API de Anthropic.",
+                        "esperar (límite de uso, sin conexión…), espera sola y sigue. Elige cómo quieres usar Claude:",
         "welcome_step1": "1. Crea una cuenta en la consola de Anthropic.",
         "welcome_step2": "2. Añade un poco de saldo (con unos pocos dólares hay para cientos de preguntas).",
         "welcome_step3": "3. Crea una «API key», cópiala y pégala aquí.",
@@ -170,6 +169,71 @@ TEXTOS: dict[str, dict[str, str]] = {
         "already_text": "Ya hay otra copia de Claude Batch Monitor en marcha{proceso}.\n\n"
                         "Dos copias a la vez se pisarían el gasto acumulado y el tope de gasto dejaría de proteger. "
                         "Búscala en la barra de tareas o en la bandeja del sistema, o ciérrala antes de abrir esta.",
+        # plan de Claude (Pro/Max) a través de Claude Code
+        "welcome_tab_plan": "Con mi plan de Claude",
+        "welcome_tab_api": "Con una clave de API",
+        "welcome_plan_text": "Usa el plan de Claude que ya pagas (Pro o Max): no pagas por cada pregunta. Cuando se "
+                             "acaba tu cupo, el programa espera solo a que se renueve y sigue.",
+        "welcome_plan_how": "Funciona a través de Claude Code, el programa oficial de Anthropic: tiene que estar "
+                            "instalado y con tu sesión iniciada.",
+        "plan_privacy": "Tus preguntas van a Claude a través de Claude Code, con tu cuenta. Este programa no ve ni "
+                        "guarda tu contraseña ni tus credenciales.",
+        "plan_checking": "Comprobando Claude Code…",
+        "plan_ok": "Claude Code está listo y usa tu plan.",
+        "plan_no_instalado": "No encuentro Claude Code en este ordenador. Instálalo, ábrelo una vez e inicia sesión con "
+                             "tu cuenta; luego pulsa «Comprobar de nuevo».",
+        "plan_antiguo": "Tu Claude Code es demasiado antiguo. Actualízalo (en una terminal: claude update) y vuelve "
+                        "a comprobar.",
+        "plan_sin_sesion": "Claude Code está instalado, pero no has iniciado sesión. En una terminal escribe "
+                           "«claude auth login», elige tu cuenta de Claude y vuelve a comprobar.",
+        "plan_no_es_plan": "Claude Code está iniciado con una clave de API (se paga por uso), no con tu plan. En una "
+                           "terminal escribe «claude auth logout» y luego «claude auth login» con tu cuenta de Claude.",
+        "plan_error": "No pude comprobar Claude Code: {texto}",
+        "plan_use": "Usar mi plan",
+        "plan_recheck": "Comprobar de nuevo",
+        "plan_install": "Cómo instalar Claude Code",
+        "opt_access": "Cómo usar Claude",
+        "opt_access_plan": "Con mi plan de Claude (Pro o Max)",
+        "opt_access_api": "Con una clave de API (se paga por uso)",
+        "opt_plan_model": "Modelo (con el plan)",
+        "opt_plan_model_default": "El de mi plan",
+        "opt_plan_model_help": "Si no eliges ninguno, se usa el que tu plan trae por defecto.",
+        "opt_window": "Trabajar solo en una franja horaria",
+        "opt_window_from": "de",
+        "opt_window_to": "a",
+        "opt_window_help": "Por ejemplo, de 22:00 a 07:00: fuera de esas horas las preguntas esperan y no se envían.",
+        "opt_bad_plan_model": "Ese nombre de modelo no vale. Usa un alias como sonnet u opus, o déjalo en «El de mi plan».",
+        "opt_bad_window": "La franja debe ser de una hora a otra, como 22:00 a 07:00.",
+        "status_wait_plan": "Has llegado al límite de tu plan. Sigo sola {cuando} (faltan {t}).",
+        "status_wait_franja": "Fuera de tu franja horaria. Sigo sola {cuando} (faltan {t}).",
+        "plan_usage": "Plan: {resumen}",
+        "plan_included": "Incluido en tu plan",
+        "btn_open_usage": "Ver mi uso",
+        "banner_plan_extra": "Tu plan se agotó y Claude Code empezó a gastar créditos extra (de pago). La cola se "
+                             "detuvo para no gastarlos; la última respuesta está guardada. Cuando tu plan se renueve, "
+                             "pulsa «Reanudar».",
+        "banner_plan_credits": "Tu plan se quedó sin uso incluido y Claude Code pide créditos de pago. Este programa no "
+                               "los gasta. Cuando tu plan se renueve, pulsa «Reanudar».",
+        "banner_plan_spend": "Has llegado a un límite de gasto de tu cuenta de Claude. Súbelo o espera a que se renueve "
+                             "y pulsa «Reanudar».",
+        "banner_plan_auth": "Claude Code no tiene la sesión iniciada o ha caducado. En una terminal escribe "
+                            "«claude auth login» y pulsa «Reanudar».",
+        "banner_plan_account": "Tu cuenta de Claude no puede usar Claude Code ahora mismo (en espera, suspendida o sin "
+                               "permiso). Revisa tu cuenta.",
+        "banner_plan_model": "Tu plan no permite el modelo elegido, o no existe. Elige otro en Opciones (o déjalo en "
+                             "«El de mi plan»).",
+        "banner_plan_apikey": "Claude Code está usando una clave de API (se paga por token), no tu plan. No se envió "
+                              "nada. Quita la clave o inicia sesión con «claude auth login».",
+        "banner_plan_nohour": "Claude Code dijo que se alcanzó el límite de tu plan pero no cuándo vuelve. Mira tu uso "
+                              "y pulsa «Reanudar» cuando quieras reintentar.",
+        "banner_plan_error": "No se pudo usar Claude Code.",
+        "plan_win_session": "sesión",
+        "plan_win_week": "semana",
+        "plan_renews": "se renueva {cuando}",
+        "when_today": "a las {hora}",
+        "when_day": "el {dia} a las {hora}",
+        "key_library": "Falta la librería «anthropic» para usar una clave de API. Instálala con:  {comando}  y vuelve a "
+                       "abrir el programa. (Con tu plan de Claude no hace falta.)",
     },
     "en": {
         "app_title": "Claude · Question queue",
@@ -233,8 +297,7 @@ TEXTOS: dict[str, dict[str, str]] = {
         "btn_retry": "Resume",
         "welcome_title": "Getting started",
         "welcome_text": "This app sends your questions to Claude and keeps them in a queue: if it has to wait "
-                        "(usage limit, no connection…), it waits by itself and carries on. It needs an "
-                        "Anthropic API key to work.",
+                        "(usage limit, no connection…), it waits by itself and carries on. Choose how you want to use Claude:",
         "welcome_step1": "1. Create an account in the Anthropic console.",
         "welcome_step2": "2. Add a little credit (a few dollars cover hundreds of questions).",
         "welcome_step3": "3. Create an “API key”, copy it and paste it here.",
@@ -323,6 +386,70 @@ TEXTOS: dict[str, dict[str, str]] = {
                         "Two copies at once would overwrite each other's running spend total and the spend cap "
                         "would stop protecting you. Look for it in the taskbar or the system tray, or close it "
                         "before opening this one.",
+        # Claude plan (Pro/Max) through Claude Code
+        "welcome_tab_plan": "With my Claude plan",
+        "welcome_tab_api": "With an API key",
+        "welcome_plan_text": "Use the Claude plan you already pay for (Pro or Max): you don't pay per question. When "
+                             "your allowance runs out, the program waits by itself until it renews and carries on.",
+        "welcome_plan_how": "It works through Claude Code, Anthropic's official program: it has to be installed and "
+                            "signed in.",
+        "plan_privacy": "Your questions go to Claude through Claude Code, with your account. This program never sees "
+                        "or stores your password or credentials.",
+        "plan_checking": "Checking Claude Code…",
+        "plan_ok": "Claude Code is ready and uses your plan.",
+        "plan_no_instalado": "I can't find Claude Code on this computer. Install it, open it once and sign in with "
+                             "your account; then press “Check again”.",
+        "plan_antiguo": "Your Claude Code is too old. Update it (in a terminal: claude update) and check again.",
+        "plan_sin_sesion": "Claude Code is installed but you are not signed in. In a terminal type “claude auth "
+                           "login”, choose your Claude account and check again.",
+        "plan_no_es_plan": "Claude Code is signed in with an API key (pay per use), not with your plan. In a terminal "
+                           "type “claude auth logout” and then “claude auth login” with your Claude account.",
+        "plan_error": "I couldn't check Claude Code: {texto}",
+        "plan_use": "Use my plan",
+        "plan_recheck": "Check again",
+        "plan_install": "How to install Claude Code",
+        "opt_access": "How to use Claude",
+        "opt_access_plan": "With my Claude plan (Pro or Max)",
+        "opt_access_api": "With an API key (pay per use)",
+        "opt_plan_model": "Model (with the plan)",
+        "opt_plan_model_default": "My plan's default",
+        "opt_plan_model_help": "If you pick none, your plan's default model is used.",
+        "opt_window": "Work only during a time window",
+        "opt_window_from": "from",
+        "opt_window_to": "to",
+        "opt_window_help": "For example, 22:00 to 07:00: outside those hours the questions wait and are not sent.",
+        "opt_bad_plan_model": "That model name isn't valid. Use an alias such as sonnet or opus, or leave it on “My plan's default”.",
+        "opt_bad_window": "The window must be from one time to another, like 22:00 to 07:00.",
+        "status_wait_plan": "You reached your plan's limit. Resuming by itself {cuando} ({t} left).",
+        "status_wait_franja": "Outside your time window. Resuming by itself {cuando} ({t} left).",
+        "plan_usage": "Plan: {resumen}",
+        "plan_included": "Included in your plan",
+        "btn_open_usage": "See my usage",
+        "banner_plan_extra": "Your plan ran out and Claude Code started spending extra credits (paid). The queue "
+                             "stopped so it doesn't spend them; the last answer is saved. When your plan renews, "
+                             "press “Resume”.",
+        "banner_plan_credits": "Your plan has no included usage left and Claude Code asks for paid credits. This "
+                               "program doesn't spend them. When your plan renews, press “Resume”.",
+        "banner_plan_spend": "You reached a spending limit on your Claude account. Raise it or wait for it to renew "
+                             "and press “Resume”.",
+        "banner_plan_auth": "Claude Code is not signed in, or the session expired. In a terminal type “claude auth "
+                            "login” and press “Resume”.",
+        "banner_plan_account": "Your Claude account can't use Claude Code right now (on hold, suspended or without "
+                               "permission). Check your account.",
+        "banner_plan_model": "Your plan doesn't allow the chosen model, or it doesn't exist. Pick another in Options "
+                             "(or leave it on “My plan's default”).",
+        "banner_plan_apikey": "Claude Code is using an API key (pay per token), not your plan. Nothing was sent. "
+                              "Remove the key or sign in with “claude auth login”.",
+        "banner_plan_nohour": "Claude Code said your plan's limit was reached but not when it returns. Check your "
+                              "usage and press “Resume” whenever you want to retry.",
+        "banner_plan_error": "Claude Code could not be used.",
+        "plan_win_session": "session",
+        "plan_win_week": "week",
+        "plan_renews": "renews {cuando}",
+        "when_today": "at {hora}",
+        "when_day": "on {dia} at {hora}",
+        "key_library": "The “anthropic” library is missing, and it is needed to use an API key. Install it with:  "
+                       "{comando}  and reopen the program. (With your Claude plan it isn't needed.)",
     },
 }
 

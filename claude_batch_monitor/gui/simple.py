@@ -11,6 +11,7 @@ import gc
 import threading
 import tkinter as tk
 import webbrowser
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -24,11 +25,13 @@ from ..claves import (
     listar_modelos,
     probar_clave,
 )
-from ..cola import Cola, EstadoCola, EventosCola
-from ..config import TEMAS, ConfigManager, Configuracion, a_decimal
+from ..cola import Cola, EstadoCola, EventosCola, hay_fallidas
+from ..config import MODELO_PLAN_VALIDO, TEMAS, ConfigManager, Configuracion, a_decimal
 from ..core.base import StopReason
-from ..core.sequential import SequentialEngine
+from ..core.claude_code import EstadoClaude, comprobar_claude
+from ..ejecutor import motor_para
 from ..export import ErrorDeExportacion, exportar, leer_respuesta
+from ..franja import leer_franja, texto_de_franja
 from ..job import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -48,7 +51,19 @@ from ..pricing import (
 from ..state import obtener_api_key, origen_api_key
 from . import formato, tray
 from .bridge import UiBridge
-from .comun import URL_CONSOLA, URL_FACTURACION, Modal, avisar_de_errores_inesperados, poner_icono
+from .comun import (
+    MODELOS_DEL_PLAN,
+    URL_CLAUDE_CODE,
+    URL_CONSOLA,
+    URL_FACTURACION,
+    URL_USO_DEL_PLAN,
+    Desplazable,
+    Modal,
+    avisar_de_errores_inesperados,
+    cuando,
+    poner_icono,
+    texto_del_plan,
+)
 from .estilo import aplicar_estilo, tarjeta
 from .i18n import fijar_idioma, t
 
@@ -58,9 +73,16 @@ INTERVALO_DE_REPINTADO_MS = 60  # lo que llega por streaming se pinta como mucho
 
 
 def formatear_tiempo(segundos: float) -> str:
-    """`75.2` -> `1:15`."""
+    """`75.2` -> `1:15`; `3725` -> `1:02:05`; `93600` -> `1 d 2:00:00` (con el plan, una espera dura horas o días)."""
     s = max(0, int(round(segundos)))
-    return f"{s // 60}:{s % 60:02d}"
+    dias, s = divmod(s, 86400)
+    horas, s = divmod(s, 3600)
+    minutos, s = divmod(s, 60)
+    if dias:
+        return f"{dias} d {horas}:{minutos:02d}:{s:02d}"
+    if horas:
+        return f"{horas}:{minutos:02d}:{s:02d}"
+    return f"{minutos}:{s:02d}"
 
 
 def config_inicial() -> Configuracion:
@@ -88,6 +110,7 @@ class _EventosDeLaCola(EventosCola):
     def cuenta_atras(self, restante: float) -> None: self.app.on_cuenta_atras(restante)
     def delta(self, msg_id: int, texto: str) -> None: self.app.on_delta(msg_id, texto)
     def gasto(self, usd: Decimal) -> None: self.app.on_gasto(usd)
+    def plan(self, estado: Any) -> None: self.app.on_plan(estado)
     def error(self, texto: str) -> None: self.app.on_error(texto)
 
 
@@ -155,11 +178,17 @@ class PanelClave(ttk.Frame):
 
     def _fallo(self, e: ErrorDeClave) -> None:
         self.boton.state(["!disabled"])
-        texto = {
-            "invalida": t("key_bad"),
-            "sin_conexion": t("key_offline"),
-            "vacia": t("key_empty"),
-        }.get(e.tipo) or t("key_other", texto=e.detalle)
+        if e.tipo == "libreria":
+            # (import tardío: `instalacion` importa partes de este paquete)
+            from ..instalacion import comando_visible
+
+            texto = t("key_library", comando=comando_visible())
+        else:
+            texto = {
+                "invalida": t("key_bad"),
+                "sin_conexion": t("key_offline"),
+                "vacia": t("key_empty"),
+            }.get(e.tipo) or t("key_other", texto=e.detalle)
         self._decir(texto, self.app.p.error)
 
     def _exito(self, clave: str, modelos: list[str]) -> None:
@@ -171,28 +200,86 @@ class PanelClave(ttk.Frame):
         self.al_terminar(modelos)
 
 
+def _partes_de_franja(texto: str) -> tuple[str, str]:
+    """`22:00-07:00` -> ('22:00', '07:00'). Sin franja (o ilegible), las horas de ejemplo: de noche."""
+    try:
+        franja = leer_franja(texto)
+    except ValueError:
+        franja = None
+    if franja is None:
+        return "22:00", "07:00"
+    return f"{franja[0]:%H:%M}", f"{franja[1]:%H:%M}"
+
+
+def texto_de_estado_claude(estado: Optional[EstadoClaude]) -> str:
+    """Qué le pasa a Claude Code, en el idioma de la ventana (None = aún se está comprobando)."""
+    if estado is None:
+        return t("plan_checking")
+    if estado.listo:
+        return t("plan_ok")
+    clave = f"plan_{estado.estado}"
+    return t(clave if estado.estado in ("no_instalado", "antiguo", "sin_sesion", "no_es_plan") else "plan_error",
+             texto=estado.detalle or "?")
+
+
 class DialogoOpciones(Modal):
     def __init__(self, app: SimpleApp):
         super().__init__(app, t("opt_title"), 560)
         p, f, c = app.p, app.f, app.config
-        cuerpo = ttk.Frame(self, padding=20)
-        cuerpo.grid(row=0, column=0, sticky="nsew")
+        # El cuerpo se desplaza si la pantalla es pequeña; el aviso y los botones, abajo, quedan siempre a la vista.
+        self.panel = Desplazable(self, p)
+        self.panel.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        cuerpo = self.panel.interior
+        cuerpo.configure(padding=(20, 20, 20, 4))
         cuerpo.columnconfigure(0, weight=1)
 
-        # Clave
-        ttk.Label(cuerpo, text=t("opt_key"), style="Seccion.TLabel").grid(row=0, column=0, sticky="w")
+        # Cómo se usa Claude: con el plan (a través de Claude Code) o con una clave de API
+        ttk.Label(cuerpo, text=t("opt_access"), style="Seccion.TLabel").grid(row=0, column=0, sticky="w")
+        self.acceso = tk.StringVar(value="plan" if c.es_plan else "api")
+        for numero, (valor, clave) in enumerate((("plan", "opt_access_plan"), ("api", "opt_access_api")), start=1):
+            ttk.Radiobutton(cuerpo, text=t(clave), value=valor, variable=self.acceso,
+                            command=self._cambiar_acceso).grid(row=numero, column=0, sticky="w", pady=(3, 0))
+
+        # --- Con el plan: modelo y estado de Claude Code
+        self.zona_plan = ttk.Frame(cuerpo)
+        self.zona_plan.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        self.zona_plan.columnconfigure(0, weight=1)
+        zp = self.zona_plan
+        ttk.Label(zp, text=t("opt_plan_model"), style="Seccion.TLabel").grid(row=0, column=0, sticky="w")
+        self._modelo_del_plan = t("opt_plan_model_default")
+        self.modelo_plan = tk.StringVar(value=c.modelo_plan or self._modelo_del_plan)
+        opciones = list(dict.fromkeys([self._modelo_del_plan, *MODELOS_DEL_PLAN, *([c.modelo_plan] if c.modelo_plan else [])]))
+        self.combo_plan = ttk.Combobox(zp, textvariable=self.modelo_plan, values=opciones)
+        self.combo_plan.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(zp, text=t("opt_plan_model_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
+            row=2, column=0, sticky="w", pady=(4, 0))
+        self.estado_claude = ttk.Label(zp, text="", style="Sub.TLabel", wraplength=500, justify="left")
+        self.estado_claude.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        enlaces_plan = ttk.Frame(zp)
+        enlaces_plan.grid(row=4, column=0, sticky="w", pady=(2, 0))
+        ttk.Button(enlaces_plan, text=t("plan_recheck"), style="Enlace.TButton",
+                   command=self._comprobar_claude).pack(side="left")
+        ttk.Button(enlaces_plan, text=t("btn_open_usage"), style="Enlace.TButton",
+                   command=lambda: app.abrir_url(URL_USO_DEL_PLAN)).pack(side="left")
+
+        # --- Con una clave de API: clave, modelo y tope de gasto
+        self.zona_api = ttk.Frame(cuerpo)
+        self.zona_api.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        self.zona_api.columnconfigure(0, weight=1)
+        za = self.zona_api
+        ttk.Label(za, text=t("opt_key"), style="Seccion.TLabel").grid(row=0, column=0, sticky="w")
         origen = origen_api_key()
         estado_clave = {"entorno": t("opt_key_env"), "llavero": t("opt_key_keyring")}.get(origen) or t("opt_key_none")
-        ttk.Label(cuerpo, text=estado_clave, style="Sub.TLabel", wraplength=500, justify="left").grid(
+        ttk.Label(za, text=estado_clave, style="Sub.TLabel", wraplength=500, justify="left").grid(
             row=1, column=0, sticky="w", pady=(2, 4))
-        self.boton_clave = ttk.Button(cuerpo, text=t("btn_change_key"), command=self._cambiar_clave)
+        self.boton_clave = ttk.Button(za, text=t("btn_change_key"), command=self._cambiar_clave)
         self.boton_clave.grid(row=2, column=0, sticky="w")
         if origen == "entorno":
             self.boton_clave.state(["disabled"])
 
-        # Modelo
-        ttk.Label(cuerpo, text=t("opt_model"), style="Seccion.TLabel").grid(row=3, column=0, sticky="w", pady=(16, 0))
-        fila = ttk.Frame(cuerpo)
+        ttk.Label(za, text=t("opt_model"), style="Seccion.TLabel").grid(row=3, column=0, sticky="w", pady=(16, 0))
+        fila = ttk.Frame(za)
         fila.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         fila.columnconfigure(0, weight=1)
         self.modelo = tk.StringVar(value=c.modelo)
@@ -201,14 +288,20 @@ class DialogoOpciones(Modal):
         self.combo.grid(row=0, column=0, sticky="ew")
         self.boton_modelos = ttk.Button(fila, text=t("opt_load_models"), command=self._cargar_modelos)
         self.boton_modelos.grid(row=0, column=1, padx=(8, 0))
-        self.precio = ttk.Label(cuerpo, text=descripcion_modelo(c.modelo), style="Sub.TLabel")
+        self.precio = ttk.Label(za, text=descripcion_modelo(c.modelo), style="Sub.TLabel")
         self.precio.grid(row=5, column=0, sticky="w", pady=(4, 0))
         self.combo.bind("<<ComboboxSelected>>", lambda e: self.precio.configure(text=descripcion_modelo(self.modelo.get())))
 
-        # Instrucciones comunes
-        ttk.Label(cuerpo, text=t("opt_instructions"), style="Seccion.TLabel").grid(row=6, column=0, sticky="w", pady=(16, 0))
+        ttk.Label(za, text=t("opt_cap"), style="Seccion.TLabel").grid(row=6, column=0, sticky="w", pady=(16, 0))
+        self.tope = tk.StringVar(value=f"{c.tope_gasto_usd:f}".rstrip("0").rstrip(".") or "0")
+        ttk.Entry(za, textvariable=self.tope, width=12).grid(row=7, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(za, text=t("opt_cap_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
+            row=8, column=0, sticky="w", pady=(4, 0))
+
+        # --- Común: instrucciones, franja horaria, arranque, idioma y tema
+        ttk.Label(cuerpo, text=t("opt_instructions"), style="Seccion.TLabel").grid(row=4, column=0, sticky="w", pady=(16, 0))
         caja_i = tarjeta(cuerpo, p)
-        caja_i.grid(row=7, column=0, sticky="ew", pady=(4, 0))
+        caja_i.grid(row=5, column=0, sticky="ew", pady=(4, 0))
         caja_i.columnconfigure(0, weight=1)
         self.instrucciones = tk.Text(caja_i, height=3, wrap="word", relief="flat", font=f.texto, padx=10, pady=8,
                                      background=p.superficie, foreground=p.texto, insertbackground=p.texto,
@@ -216,20 +309,28 @@ class DialogoOpciones(Modal):
         self.instrucciones.grid(row=0, column=0, sticky="ew")
         self.instrucciones.insert("1.0", c.system_prompt)
         ttk.Label(cuerpo, text=t("opt_instructions_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
-            row=8, column=0, sticky="w", pady=(4, 0))
+            row=6, column=0, sticky="w", pady=(4, 0))
 
-        # Tope
-        ttk.Label(cuerpo, text=t("opt_cap"), style="Seccion.TLabel").grid(row=9, column=0, sticky="w", pady=(16, 0))
-        self.tope = tk.StringVar(value=f"{c.tope_gasto_usd:f}".rstrip("0").rstrip(".") or "0")
-        ttk.Entry(cuerpo, textvariable=self.tope, width=12).grid(row=10, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(cuerpo, text=t("opt_cap_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
-            row=11, column=0, sticky="w", pady=(4, 0))
+        self.usar_franja = tk.BooleanVar(value=bool(c.franja.strip()))
+        ttk.Checkbutton(cuerpo, text=t("opt_window"), variable=self.usar_franja, command=self._cambiar_franja).grid(
+            row=7, column=0, sticky="w", pady=(16, 0))
+        fila_f = ttk.Frame(cuerpo)
+        fila_f.grid(row=8, column=0, sticky="w", pady=(4, 0))
+        desde, hasta = _partes_de_franja(c.franja)
+        self.franja_desde, self.franja_hasta = tk.StringVar(value=desde), tk.StringVar(value=hasta)
+        ttk.Label(fila_f, text=t("opt_window_from")).pack(side="left")
+        self.entrada_desde = ttk.Entry(fila_f, textvariable=self.franja_desde, width=7, justify="center")
+        self.entrada_desde.pack(side="left", padx=(8, 8))
+        ttk.Label(fila_f, text=t("opt_window_to")).pack(side="left")
+        self.entrada_hasta = ttk.Entry(fila_f, textvariable=self.franja_hasta, width=7, justify="center")
+        self.entrada_hasta.pack(side="left", padx=(8, 0))
+        ttk.Label(cuerpo, text=t("opt_window_help"), style="Sub.TLabel", wraplength=500, justify="left").grid(
+            row=9, column=0, sticky="w", pady=(4, 0))
 
-        # Resto
         self.auto = tk.BooleanVar(value=c.auto_arranque)
-        ttk.Checkbutton(cuerpo, text=t("opt_autostart"), variable=self.auto).grid(row=12, column=0, sticky="w", pady=(14, 0))
+        ttk.Checkbutton(cuerpo, text=t("opt_autostart"), variable=self.auto).grid(row=10, column=0, sticky="w", pady=(14, 0))
         fila_i = ttk.Frame(cuerpo)
-        fila_i.grid(row=13, column=0, sticky="w", pady=(10, 0))
+        fila_i.grid(row=11, column=0, sticky="w", pady=(10, 0))
         ttk.Label(fila_i, text=t("opt_language")).pack(side="left")
         self._idiomas = {"Auto": "", "Español": "es", "English": "en"}
         actual = next((k for k, v in self._idiomas.items() if v == c.idioma), "Auto")
@@ -242,23 +343,62 @@ class DialogoOpciones(Modal):
         ttk.Combobox(fila_i, textvariable=self.tema, values=list(self._temas), state="readonly", width=10).pack(
             side="left", padx=(8, 0))
 
-        self.aviso = tk.Label(cuerpo, text="", anchor="w", justify="left", wraplength=500,
+        # Pie: el aviso de lo que no vale, los enlaces y los botones (fuera de la zona que se desplaza)
+        pie = ttk.Frame(self, padding=(20, 4, 20, 18))
+        pie.grid(row=1, column=0, sticky="ew")
+        pie.columnconfigure(0, weight=1)
+        self.aviso = tk.Label(pie, text="", anchor="w", justify="left", wraplength=500,
                               background=p.fondo, foreground=p.error, font=f.base)
-        self.aviso.grid(row=14, column=0, sticky="w", pady=(8, 0))
-
-        # Enlaces y botones
-        enlaces = ttk.Frame(cuerpo)
-        enlaces.grid(row=15, column=0, sticky="ew", pady=(14, 0))
+        self.aviso.grid(row=0, column=0, sticky="w")
+        enlaces = ttk.Frame(pie)
+        enlaces.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         ttk.Button(enlaces, text=t("opt_advanced"), style="Enlace.TButton", command=self._avanzado).pack(side="left")
         ttk.Button(enlaces, text=t("opt_folder"), style="Enlace.TButton",
                    command=lambda: abrir_ruta(paths.RESPONSES_DIR)).pack(side="left")
         ttk.Label(enlaces, text=t("opt_about", v=paths.APP_VERSION), style="Pequeno.TLabel").pack(side="right")
-
-        botones = ttk.Frame(cuerpo)
-        botones.grid(row=16, column=0, sticky="e", pady=(16, 0))
+        botones = ttk.Frame(pie)
+        botones.grid(row=2, column=0, sticky="e", pady=(12, 0))
         ttk.Button(botones, text=t("opt_cancel"), command=self.destroy).pack(side="left")
         ttk.Button(botones, text=t("opt_save"), style="Primary.TButton", command=self.guardar).pack(side="left", padx=(8, 0))
+
+        self._cambiar_acceso()
+        self._cambiar_franja()
+        self._pintar_estado_claude(app.estado_claude)
+        if app.estado_claude is None and c.es_plan:
+            self._comprobar_claude()
         self.mostrar()
+
+    # -- plan / clave
+
+    def _ajustar_alto(self) -> None:
+        # 300 px de margen: la barra de título, la de tareas y el pie con los botones
+        self.panel.ajustar_tamano(self.winfo_screenheight() - 300)
+
+    def _cambiar_acceso(self) -> None:
+        plan = self.acceso.get() == "plan"
+        (self.zona_plan if plan else self.zona_api).grid()
+        (self.zona_api if plan else self.zona_plan).grid_remove()
+        self._ajustar_alto()
+        if plan and self.app.estado_claude is None:
+            self._comprobar_claude()
+
+    def _pintar_estado_claude(self, estado: Optional[EstadoClaude]) -> None:
+        try:
+            self.estado_claude.configure(
+                text=texto_de_estado_claude(estado),
+                foreground=self.app.p.ok if estado is not None and estado.listo else (
+                    self.app.p.apagado if estado is None else self.app.p.error))
+        except tk.TclError:
+            pass  # el diálogo se cerró mientras se comprobaba
+
+    def _comprobar_claude(self) -> None:
+        self._pintar_estado_claude(None)
+        self.app.comprobar_plan(self._pintar_estado_claude, usar_cache=False)
+
+    def _cambiar_franja(self) -> None:
+        estado = ["!disabled"] if self.usar_franja.get() else ["disabled"]
+        self.entrada_desde.state(estado)
+        self.entrada_hasta.state(estado)
 
     def _cambiar_clave(self) -> None:
         d = Modal(self.app, t("opt_key"), 520)
@@ -299,16 +439,39 @@ class DialogoOpciones(Modal):
         self.destroy()
         self.app.cambiar_a_avanzado()
 
+    def _avisar(self, texto: str) -> None:
+        self.aviso.configure(text=texto, foreground=self.app.p.error)
+
     def guardar(self) -> None:
-        tope = a_decimal(self.tope.get(), Decimal(-1))
+        plan = self.acceso.get() == "plan"
+        # El tope de gasto es de la clave de API: con el plan no se toca (ni se valida lo que haya en el campo).
+        tope = self.app.config.tope_gasto_usd if plan else a_decimal(self.tope.get(), Decimal(-1))
         if tope < 0:
-            self.aviso.configure(text=t("opt_bad_cap"), foreground=self.app.p.error)
+            self._avisar(t("opt_bad_cap"))
             return
+        modelo_plan = None
+        if plan:
+            elegido = self.modelo_plan.get().strip()
+            modelo_plan = "" if elegido in ("", self._modelo_del_plan) else elegido
+            if modelo_plan and not MODELO_PLAN_VALIDO.match(modelo_plan):
+                self._avisar(t("opt_bad_plan_model"))
+                return
+        franja = ""
+        if self.usar_franja.get():
+            try:
+                leida = leer_franja(f"{self.franja_desde.get().strip()}-{self.franja_hasta.get().strip()}")
+                if leida is None:
+                    raise ValueError("franja vacía")
+                franja = texto_de_franja(leida)
+            except ValueError:
+                self._avisar(t("opt_bad_window"))
+                return
         self.app.aplicar_opciones(
             modelo=self.modelo.get().strip(), tope=tope, auto=self.auto.get(),
             idioma=self._idiomas.get(self.idioma.get(), ""),
             instrucciones=self.instrucciones.get("1.0", "end-1c").strip(),
             tema=self._temas.get(self.tema.get(), "auto"),
+            acceso=self.acceso.get(), modelo_plan=modelo_plan, franja=franja,
         )
         self.destroy()
 
@@ -347,17 +510,23 @@ class SimpleApp:
         self,
         root: tk.Tk,
         config: Optional[Configuracion] = None,
-        fabrica: Callable[..., Any] = SequentialEngine,
+        fabrica: Callable[..., Any] = motor_para,
         probar: Callable[[str], list[str]] = probar_clave,
         listar: Callable[[str], list[str]] = listar_modelos,
         guardar: Callable[[str], str] = guardar_clave,
         abrir_url: Callable[[str], Any] = webbrowser.open,
         usar_bandeja: bool = True,
+        comprobar_plan: Callable[..., EstadoClaude] = comprobar_claude,
     ):
         self.root = root
         self.config = config or config_inicial()
         fijar_idioma(self.config.idioma)
         self.probar, self.listar, self.guardar, self.abrir_url = probar, listar, guardar, abrir_url
+        self._comprobar_plan_con = comprobar_plan  # (ruta_configurada, usar_cache=...) -> EstadoClaude
+        self.estado_claude: Optional[EstadoClaude] = None  # lo último que se sabe de Claude Code (None = sin comprobar)
+        self._estado_plan: Optional[Any] = None             # lo último que se sabe del cupo del plan
+        self._reanuda_a_las: Optional[datetime] = None      # a qué hora acaba la espera en curso (plan o franja)
+        self._banner_del_plan = False                        # el aviso que se ve es el de «Claude Code no está listo»
         self.resultado: Optional[str] = None  # None = salir; "avanzada" = cambiar de modo
 
         root.title(t("app_title"))
@@ -392,10 +561,13 @@ class SimpleApp:
         root.protocol("WM_DELETE_WINDOW", self.cerrar)
 
         self.pantalla = "bienvenida"
-        if obtener_api_key():
+        if self.config.es_plan:
+            self._entrar()
+            self.comprobar_plan()  # sin bloquear: si Claude Code no está listo, un aviso lo explica
+        elif obtener_api_key():
             self._entrar()
         else:
-            self.f_bienvenida.tkraise()
+            self._mostrar_bienvenida()
 
     # ------------------------------------------------------------------
     # Construcción
@@ -407,14 +579,50 @@ class SimpleApp:
         caja = ttk.Frame(f)
         caja.grid(row=0, column=0)
         ttk.Label(caja, text=t("welcome_title"), style="Titulo.TLabel").pack(anchor="w")
-        ttk.Label(caja, text=t("welcome_text"), wraplength=560, justify="left").pack(anchor="w", pady=(10, 14))
+        self.pestanas = ttk.Notebook(caja)
+        self.pestanas.pack(fill="x", pady=(12, 0))
+        plan = ttk.Frame(self.pestanas, padding=(6, 18, 6, 8))
+        api = ttk.Frame(self.pestanas, padding=(6, 18, 6, 8))
+        self.pestanas.add(plan, text=t("welcome_tab_plan"))
+        self.pestanas.add(api, text=t("welcome_tab_api"))
+
+        # Con mi plan de Claude: no hace falta clave ni saldo, solo tener Claude Code con la sesión iniciada
+        ttk.Label(plan, text=t("welcome_plan_text"), wraplength=560, justify="left").pack(anchor="w")
+        ttk.Label(plan, text=t("welcome_plan_how"), wraplength=560, justify="left", style="Sub.TLabel").pack(
+            anchor="w", pady=(8, 0))
+        self.bienvenida_estado = tk.Label(plan, text=t("plan_checking"), anchor="w", justify="left", wraplength=560,
+                                          background=self.p.fondo, foreground=self.p.apagado, font=self.f.base)
+        self.bienvenida_estado.pack(fill="x", pady=(16, 0))
+        fila = ttk.Frame(plan)
+        fila.pack(fill="x", pady=(12, 0))
+        self.boton_usar_plan = ttk.Button(fila, text=t("plan_use"), style="Primary.TButton", command=self.usar_plan)
+        self.boton_usar_plan.pack(side="left")
+        self.boton_usar_plan.state(["disabled"])
+        self.boton_comprobar = ttk.Button(fila, text=t("plan_recheck"), command=self._comprobar_en_bienvenida)
+        self.boton_comprobar.pack(side="left", padx=(8, 0))
+        ttk.Button(fila, text=t("plan_install"), style="Enlace.TButton",
+                   command=lambda: self.abrir_url(URL_CLAUDE_CODE)).pack(side="left", padx=(8, 0))
+        ttk.Label(plan, text=t("plan_privacy"), style="Pequeno.TLabel", wraplength=560, justify="left").pack(
+            anchor="w", pady=(18, 0))
+
+        # Con una clave de API: se paga por lo que se use
+        ttk.Label(api, text=t("welcome_text"), wraplength=560, justify="left").pack(anchor="w", pady=(0, 12))
         for clave in ("welcome_step1", "welcome_step2", "welcome_step3"):
-            ttk.Label(caja, text=t(clave), wraplength=560, justify="left").pack(anchor="w", pady=2)
-        ttk.Button(caja, text=t("welcome_open_console"), command=lambda: self.abrir_url(URL_CONSOLA)).pack(
+            ttk.Label(api, text=t(clave), wraplength=560, justify="left").pack(anchor="w", pady=2)
+        ttk.Button(api, text=t("welcome_open_console"), command=lambda: self.abrir_url(URL_CONSOLA)).pack(
             anchor="w", pady=(12, 14))
-        self.panel_clave = PanelClave(caja, self, lambda modelos: self._clave_lista(modelos))
+        self.aviso_libreria: Optional[tk.Label] = None
+        # (import tardío: `instalacion` importa partes de este paquete)
+        from ..instalacion import comando_visible, falta_anthropic
+
+        if falta_anthropic():  # con el plan no hace falta, pero con una clave sí: mejor decirlo antes de pegarla
+            self.aviso_libreria = tk.Label(
+                api, text=t("key_library", comando=comando_visible()), anchor="w", justify="left", wraplength=560,
+                background=self.p.fondo, foreground=self.p.aviso, font=self.f.base)
+            self.aviso_libreria.pack(fill="x", pady=(0, 12))
+        self.panel_clave = PanelClave(api, self, lambda modelos: self._clave_lista(modelos))
         self.panel_clave.pack(fill="x")
-        ttk.Label(caja, text=t("welcome_privacy"), style="Pequeno.TLabel", wraplength=560, justify="left").pack(
+        ttk.Label(api, text=t("welcome_privacy"), style="Pequeno.TLabel", wraplength=560, justify="left").pack(
             anchor="w", pady=(18, 0))
 
     def _construir_principal(self) -> None:
@@ -548,7 +756,9 @@ class SimpleApp:
         self.var_estado = tk.StringVar(value=t("status_idle"))
         ttk.Label(barra, textvariable=self.var_estado).grid(row=0, column=1, sticky="w")
         self.var_gasto = tk.StringVar()
-        ttk.Label(barra, textvariable=self.var_gasto, style="Sub.TLabel").grid(row=0, column=2, sticky="e")
+        self.etiqueta_gasto = ttk.Label(barra, textvariable=self.var_gasto, style="Sub.TLabel")
+        self.etiqueta_gasto.grid(row=0, column=2, sticky="e")
+        self._gasto_en_su_linea = False
         self.menu = tk.Menu(self.root, tearoff=0)
         self._actualizar_vacio()
         # El reparto inicial lo decide el contenido; se fija a mano para que la cola se lea entera.
@@ -575,12 +785,86 @@ class SimpleApp:
     # Arranque
     # ------------------------------------------------------------------
 
+    def _mostrar_bienvenida(self, pestana: str = "plan") -> None:
+        """La pantalla de «cómo quieres usar Claude». Al abrirla se comprueba Claude Code por si ya está listo."""
+        self.pantalla = "bienvenida"
+        self.pestanas.select(0 if pestana == "plan" else 1)
+        self.f_bienvenida.tkraise()
+        self._comprobar_en_bienvenida(usar_cache=True)
+
+    def _comprobar_en_bienvenida(self, usar_cache: bool = False) -> None:
+        self._pintar_plan_en_bienvenida(None)
+        self.comprobar_plan(self._pintar_plan_en_bienvenida, usar_cache=usar_cache)
+
+    def _pintar_plan_en_bienvenida(self, estado: Optional[EstadoClaude]) -> None:
+        # «error» = no se pudo comprobar (p. ej. tardó demasiado): se deja intentarlo, el envío dirá la verdad
+        usable = estado is not None and estado.estado in ("ok", "error")
+        if estado is None:
+            color = self.p.apagado
+        else:
+            color = self.p.ok if estado.listo else (self.p.aviso if usable else self.p.error)
+        self.bienvenida_estado.configure(text=texto_de_estado_claude(estado), foreground=color)
+        self.boton_usar_plan.state(["!disabled"] if usable else ["disabled"])
+        self.boton_comprobar.state(["disabled"] if estado is None else ["!disabled"])
+
+    def usar_plan(self) -> None:
+        """Elige trabajar con el plan de Claude (Claude Code) y entra a la cola."""
+        self.config.modo = "plan"
+        ConfigManager.guardar(self.config)
+        self.cola.actualizar_config(self.config)
+        self._entrar()
+        self._plan_comprobado(self.estado_claude, None)
+
     def _clave_lista(self, modelos: list[str]) -> None:
         elegido = elegir_modelo_por_defecto(modelos, self.config.modelo)
-        if elegido != self.config.modelo:
-            self.config.modelo = elegido
+        cambio = elegido != self.config.modelo or self.config.es_plan  # (quien pega una clave elige la API)
+        self.config.modelo = elegido
+        if self.config.es_plan:
+            self.config.modo = "inmediato"
+        if cambio:
             ConfigManager.guardar(self.config)
+            self.cola.actualizar_config(self.config)
         self._luego(700, self._entrar)
+
+    # ------------------------------------------------------------------
+    # Claude Code (el plan)
+    # ------------------------------------------------------------------
+
+    def comprobar_plan(self, al_terminar: Optional[Callable[[Optional[EstadoClaude]], None]] = None,
+                       usar_cache: bool = True) -> None:
+        """Comprueba Claude Code sin bloquear la ventana (lanza dos programas y puede tardar unos segundos)."""
+        def trabajo() -> None:
+            try:
+                estado = self._comprobar_plan_con(self.config.ruta_claude, usar_cache=usar_cache)
+            except Exception as error:  # pragma: no cover - defensa
+                logger.exception("No se pudo comprobar Claude Code")
+                estado = EstadoClaude("error", detalle=str(error))
+            self.bridge.post(self._plan_comprobado, estado, al_terminar)
+
+        threading.Thread(target=trabajo, daemon=True, name="comprobar-claude").start()
+
+    def _plan_comprobado(self, estado: Optional[EstadoClaude],
+                         al_terminar: Optional[Callable[[Optional[EstadoClaude]], None]] = None) -> None:
+        if estado is not None:
+            self.estado_claude = estado
+        if al_terminar is not None:
+            al_terminar(estado)
+        if self.pantalla != "principal" or estado is None:
+            return
+        if not self.config.es_plan or estado.listo:
+            if self._banner_del_plan:  # ya está bien: el aviso de «Claude Code no está listo» sobra
+                self._banner_fijo = False
+                self._banner_del_plan = False
+                self._ocultar_banner()
+            return
+        if estado.estado == "error":
+            return  # no se pudo comprobar: no se alarma, el primer envío dirá la verdad
+        self._mostrar_banner(
+            texto_de_estado_claude(estado), "",
+            [(t("plan_recheck"), lambda: self.comprobar_plan(usar_cache=False)),
+             (t("plan_install"), lambda: self.abrir_url(URL_CLAUDE_CODE))],
+            "error", fijo=True)
+        self._banner_del_plan = True
 
     def _entrar(self) -> None:
         self.pantalla = "principal"
@@ -636,9 +920,8 @@ class SimpleApp:
         texto = self.texto_de_entrada()
         if not texto:
             return
-        if not obtener_api_key():
-            self.pantalla = "bienvenida"
-            self.f_bienvenida.tkraise()
+        if not self.config.es_plan and not obtener_api_key():
+            self._mostrar_bienvenida("api")
             return
         self._quitar_placeholder()
         self.entrada.delete("1.0", "end")
@@ -700,6 +983,8 @@ class SimpleApp:
     def on_estado(self, e: EstadoCola) -> None:
         self._dibujando_estado = e
         self._ultimo_restante = e.segundos if e.tipo == "waiting" else None
+        if e.tipo == "waiting":  # la hora a la que seguirá se fija una vez: calculada cada vez, parpadearía en el cambio de minuto
+            self._reanuda_a_las = datetime.now() + timedelta(seconds=e.segundos)
         self._pintar_estado(e)
         if e.tipo == "stopped":
             self._banner_de_parada(e)
@@ -738,6 +1023,10 @@ class SimpleApp:
     def on_gasto(self, usd: Decimal) -> None:
         self._refrescar_gasto()
 
+    def on_plan(self, estado: Any) -> None:
+        self._estado_plan = estado
+        self._refrescar_gasto()
+
     def on_error(self, texto: str) -> None:
         logger.info("La cola informa: %s", texto)
 
@@ -752,7 +1041,7 @@ class SimpleApp:
             texto, color = t("status_sending", n=e.msg_id or "?"), self.p.acento_texto
         elif e.tipo == "waiting":
             restante = self._ultimo_restante if self._ultimo_restante is not None else e.segundos
-            texto = t(f"status_wait_{e.motivo}", t=formatear_tiempo(restante)) if e.motivo else t("status_stopped")
+            texto = self._texto_de_espera(e.motivo, restante) if e.motivo else t("status_stopped")
             color = self.p.aviso
         elif e.tipo == "paused":
             texto = t("status_paused_n", n=n) if n else t("status_paused")
@@ -765,7 +1054,28 @@ class SimpleApp:
         self.punto.configure(foreground=color)
         self.boton_pausa.configure(text=t("resume") if self.cola.pausada else t("pause"))
 
+    def _texto_de_espera(self, motivo: str, restante: float) -> str:
+        """«Sigo sola en 1:15» (límite por minuto…) o, si la espera es larga, «Sigo sola a las 03:10 (faltan 5:12:00)»."""
+        if motivo in ("plan", "franja"):
+            destino = self._reanuda_a_las or datetime.now() + timedelta(seconds=restante)
+            return t(f"status_wait_{motivo}", t=formatear_tiempo(restante), cuando=cuando(destino))
+        return t(f"status_wait_{motivo}", t=formatear_tiempo(restante))
+
+    def _colocar_gasto(self, en_su_linea: bool) -> None:
+        """El uso del plan es largo: va en su propia línea, bajo el estado, para no taparlo. El gasto en dólares, a la derecha."""
+        if en_su_linea == self._gasto_en_su_linea:
+            return
+        self._gasto_en_su_linea = en_su_linea
+        if en_su_linea:
+            self.etiqueta_gasto.grid_configure(row=1, column=1, columnspan=2, sticky="w")
+        else:
+            self.etiqueta_gasto.grid_configure(row=0, column=2, columnspan=1, sticky="e")
+
     def _refrescar_gasto(self) -> None:
+        self._colocar_gasto(self.config.es_plan)
+        if self.config.es_plan:  # con el plan no se paga por pregunta: se enseña cuánto cupo queda
+            self.var_gasto.set(texto_del_plan(self._estado_plan))
+            return
         gastado = formatear_usd(self.cola.gastado())
         tope = self.config.tope_gasto_usd
         if tope > 0:
@@ -846,6 +1156,7 @@ class SimpleApp:
 
     def _mostrar_banner(self, texto: str, detalle: str, botones: list[tuple[str, Callable[[], None]]],
                         tono: str, fijo: bool = False) -> None:
+        self._banner_del_plan = False
         p = self.p
         fondo, borde, color = {
             "error": (p.banner_error_fondo, p.banner_error_borde, p.error),
@@ -869,9 +1180,44 @@ class SimpleApp:
     def _ocultar_banner(self) -> None:
         self.banner.grid_remove()
 
+    def _banner_de_parada_del_plan(self, e: EstadoCola) -> None:
+        """La cola se paró usando el plan de Claude: qué pasó y qué hacer, según el código que da el motor."""
+        detalle = e.texto or self.cola.ultimo_error
+        reintentar = (t("btn_retry"), self.reanudar_pendientes)
+        uso = (t("btn_open_usage"), lambda: self.abrir_url(URL_USO_DEL_PLAN))
+        instalar = (t("plan_install"), lambda: self.abrir_url(URL_CLAUDE_CODE))
+        opciones = (t("btn_choose_model"), self.abrir_opciones)
+        comprobar = (t("plan_recheck"), lambda: self.comprobar_plan(self._tras_comprobar_y_reanudar, usar_cache=False))
+        # código -> (texto, detalle, botones, tono)
+        casos: dict[str, tuple[str, str, list[tuple[str, Callable[[], None]]], str]] = {
+            "uso_extra": (t("banner_plan_extra"), "", [uso, reintentar], "aviso"),
+            "creditos": (t("banner_plan_credits"), "", [uso, reintentar], "aviso"),
+            "gasto": (t("banner_plan_spend"), "", [uso, reintentar], "aviso"),
+            "limite_sin_hora": (t("banner_plan_nohour"), "", [uso, reintentar], "aviso"),
+            "auth": (t("banner_plan_auth"), "", [reintentar], "error"),
+            "sin_sesion": (t("plan_sin_sesion"), "", [comprobar], "error"),
+            "cuenta": (t("banner_plan_account"), "", [uso], "error"),
+            "modelo": (t("banner_plan_model"), "", [opciones], "error"),
+            "clave_de_api": (t("banner_plan_apikey"), "", [reintentar], "error"),
+            "no_instalado": (t("plan_no_instalado"), "", [comprobar, instalar], "error"),
+            "antiguo": (t("plan_antiguo"), "", [comprobar, instalar], "error"),
+            "no_es_plan": (t("plan_no_es_plan"), "", [comprobar], "error"),
+        }
+        texto, extra, botones, tono = casos.get(
+            e.codigo, (t("banner_plan_error"), t("banner_detail", texto=detalle) if detalle else "", [reintentar], "error"))
+        self._mostrar_banner(texto, extra, botones, tono)
+
+    def _tras_comprobar_y_reanudar(self, estado: Optional[EstadoClaude]) -> None:
+        """«Comprobar de nuevo» en un aviso de parada: si ya está bien, la cola sigue sola."""
+        if estado is not None and estado.listo:
+            self.reanudar_pendientes()
+
     def _banner_de_parada(self, e: EstadoCola) -> None:
         razon = e.razon
         detalle = e.texto or self.cola.ultimo_error
+        if self.config.es_plan and (e.codigo or razon is StopReason.EXTRA_USAGE):
+            self._banner_de_parada_del_plan(e)
+            return
         reintentar = (t("btn_retry"), self.reanudar_pendientes)
         consola = (t("btn_open_console"), lambda: self.abrir_url(URL_FACTURACION))
         if razon is StopReason.BUDGET:
@@ -1008,8 +1354,19 @@ class SimpleApp:
         DialogoOpciones(self)
 
     def aplicar_opciones(self, modelo: str, tope: Decimal, auto: bool, idioma: str,
-                         instrucciones: Optional[str] = None, tema: Optional[str] = None) -> None:
+                         instrucciones: Optional[str] = None, tema: Optional[str] = None,
+                         acceso: Optional[str] = None, modelo_plan: Optional[str] = None,
+                         franja: Optional[str] = None) -> None:
         sube_el_tope = tope > self.config.tope_gasto_usd or tope == 0
+        era_plan, era_modelo_plan = self.config.es_plan, self.config.modelo_plan
+        if acceso == "plan":
+            self.config.modo = "plan"
+        elif acceso == "api" and self.config.es_plan:
+            self.config.modo = "inmediato"  # (el modo «lote» de la ventana avanzada no se pisa)
+        if modelo_plan is not None:
+            self.config.modelo_plan = modelo_plan
+        if franja is not None:
+            self.config.franja = franja
         self.config.modelo = modelo or self.config.modelo
         if instrucciones is not None:
             self.config.system_prompt = instrucciones
@@ -1021,11 +1378,22 @@ class SimpleApp:
         ConfigManager.guardar(self.config)
         self.cola.actualizar_config(self.config)
         self._refrescar_gasto()
+        if self.config.es_plan != era_plan:
+            if self._banner_del_plan or self._dibujando_estado.tipo != "stopped":
+                self._banner_fijo = False
+                self._ocultar_banner()
+            if self.config.es_plan:
+                self.comprobar_plan(usar_cache=False)
+        # Una orden que falló por el modelo o la clave sigue «por hacer» para quien la arregla: `reanudar` la reintenta.
+        por_hacer = self.cola.pendientes() or hay_fallidas(self.cola.job)
         # Si la cola se paró por el tope y la persona lo ha subido, tiene sentido seguir.
         if sube_el_tope and self.cola.estado.razon is StopReason.BUDGET:
             self.reanudar_pendientes()
-        elif self.cola.estado.razon is StopReason.FATAL and self.cola.pendientes():
+        elif self.cola.estado.razon is StopReason.FATAL and por_hacer:
             self.reanudar_pendientes()  # cambió la clave o el modelo: se reintenta
+        elif (self.cola.estado.tipo == "stopped" and por_hacer
+              and (self.config.es_plan != era_plan or self.config.modelo_plan != era_modelo_plan)):
+            self.reanudar_pendientes()  # cambió cómo se usa Claude (o el modelo del plan): se reintenta
 
     def cambiar_a_avanzado(self) -> None:
         self.config.interfaz = "avanzada"

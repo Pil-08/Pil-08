@@ -22,7 +22,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 APP_NAME = "ClaudeMonitor"
-APP_VERSION = "12.3.0"
+APP_VERSION = "12.4.0"
 __version__ = APP_VERSION
 
 # Variable de entorno para guardar los datos en otro sitio (modo portátil, Docker,

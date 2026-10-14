@@ -124,7 +124,8 @@ class DialogoEstimacion(Modal):
         cuerpo.grid(row=0, column=0, sticky="nsew")
         cuerpo.columnconfigure(0, weight=1)
         lineas = est.resumen_lineas()
-        lineas.append(f"Tope configurado   : {'sin tope' if tope == 0 else formatear_usd(tope, 2)}")
+        if not est.plan:
+            lineas.append(f"Tope configurado   : {'sin tope' if tope == 0 else formatear_usd(tope, 2)}")
         self.lineas = lineas
         marco, texto = _texto_solo_lectura(cuerpo, app, len(lineas) + 1, mono=True)
         marco.grid(row=0, column=0, sticky="ew")
@@ -132,6 +133,9 @@ class DialogoEstimacion(Modal):
         _escribir_en(texto, "\n".join(lineas))
         fila = 1
         explicacion = (
+            "Con tu plan de Claude no pagas por token: cada pregunta gasta parte del cupo de tu plan (que se renueva "
+            "cada 5 horas y cada semana). Si se agota, el programa espera a que vuelva y sigue solo."
+            if est.plan else
             "El coste máximo supone que cada respuesta llena max_tokens. Lo normal es gastar bastante "
             "menos, pero el tope se calcula con el peor caso para que nunca te lleves una sorpresa."
         )

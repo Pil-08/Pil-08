@@ -6,8 +6,9 @@ import base64
 import sys
 import time
 import tkinter as tk
+from datetime import datetime
 from tkinter import messagebox, ttk
-from typing import Any
+from typing import Any, Optional
 
 from .. import paths
 from ..paths import logger
@@ -17,6 +18,37 @@ from .icono import png_del_icono
 
 URL_CONSOLA = "https://platform.claude.com"
 URL_FACTURACION = "https://platform.claude.com/settings/billing"
+URL_CLAUDE_CODE = "https://code.claude.com/docs/en/setup"
+URL_USO_DEL_PLAN = "https://claude.ai/settings/usage"
+MODELOS_DEL_PLAN = ("sonnet", "opus", "haiku")  # alias que Claude Code entiende (también acepta un id completo)
+
+
+def cuando(instante: datetime) -> str:
+    """«a las 15:30» si es hoy; «el 14/10 a las 15:30» si es otro día (una espera por el límite semanal dura días)."""
+    local = instante.astimezone() if instante.tzinfo else instante
+    if local.date() == datetime.now(local.tzinfo).date():
+        return t("when_today", hora=f"{local:%H:%M}")
+    return t("when_day", dia=f"{local:%d/%m}", hora=f"{local:%H:%M}")
+
+
+def texto_del_plan(estado: Optional[Any]) -> str:
+    """El uso del plan de Claude en una línea («Plan: sesión 12 % (se renueva a las 15:30) · semana 40 %»).
+
+    `estado` es un `EstadoPlan`; sin datos todavía, solo se dice que va incluido en el plan.
+    """
+    if estado is None or not estado.conocido():
+        return t("plan_included")
+    partes = []
+    for clave, ventana in (("plan_win_session", estado.sesion), ("plan_win_week", estado.semana)):
+        if ventana.uso is None and ventana.reinicia is None:
+            continue
+        texto = t(clave)
+        if ventana.uso is not None:
+            texto += f" {round(ventana.uso)} %"
+        if ventana.reinicia is not None:
+            texto += " (" + t("plan_renews", cuando=cuando(ventana.reinicia)) + ")"
+        partes.append(texto)
+    return t("plan_usage", resumen=" · ".join(partes))
 
 
 class Modal(tk.Toplevel):
@@ -73,6 +105,16 @@ class Desplazable(ttk.Frame):
         self._toplevel = self.winfo_toplevel()
         for evento in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self._toplevel.bind(evento, self._rueda, add="+")
+
+    def ajustar_tamano(self, alto_maximo: int) -> None:
+        """Que el panel mida lo que mide su contenido, sin pasar de `alto_maximo` píxeles (desde ahí, se desplaza).
+
+        Para ventanas de tamaño fijo (un diálogo): en una pantalla pequeña lo de abajo queda a un gesto de la rueda en
+        vez de fuera de la pantalla.
+        """
+        self.update_idletasks()
+        self._lienzo.configure(width=self.interior.winfo_reqwidth(),
+                               height=min(self.interior.winfo_reqheight(), max(200, alto_maximo)))
 
     def _al_cambiar_interior(self, _e: Any = None) -> None:
         self._lienzo.configure(scrollregion=self._lienzo.bbox("all"))

@@ -28,11 +28,13 @@ from ..claves import (
     probar_clave,
 )
 from ..cola import ETIQUETA as ETIQUETA_COLA
-from ..config import ConfigManager, Configuracion
+from ..config import MODELO_DEL_PLAN, MODELO_PLAN_VALIDO, ConfigManager, Configuracion
 from ..core.base import FRASES_DE_PARADA, StopReason
+from ..core.claude_code import EstadoClaude, comprobar_claude
 from ..ejecutor import EjecutorLote, EventosLote, motor_para
 from ..estimator import Estimacion, estimar
 from ..export import FORMATOS, ErrorDeExportacion, exportar, leer_respuesta
+from ..franja import leer_franja, texto_de_franja
 from ..inputs import (
     CAMPO_POR_DEFECTO,
     ErrorDeEntrada,
@@ -75,9 +77,18 @@ from ..state import (
 )
 from . import tray
 from .bridge import UiBridge
-from .comun import URL_FACTURACION, Desplazable, avisar_de_errores_inesperados, poner_icono
+from .comun import (
+    MODELOS_DEL_PLAN,
+    URL_FACTURACION,
+    URL_USO_DEL_PLAN,
+    Desplazable,
+    avisar_de_errores_inesperados,
+    poner_icono,
+    texto_del_plan,
+)
 from .dialogos import DialogoColumna, DialogoEstimacion, DialogoLotes, VisorRespuesta
 from .estilo import aplicar_estilo
+from .i18n import fijar_idioma
 
 SIN_ESFUERZO = "(no enviar)"
 TEMAS_VISIBLES = {"Automático": "auto", "Claro": "claro", "Oscuro": "oscuro"}  # lo que se lee -> lo que se guarda
@@ -142,6 +153,25 @@ def _hora(texto: str) -> str:
     return limpio
 
 
+def _modelo_del_plan(texto: str) -> str:
+    limpio = texto.strip()
+    if limpio and not MODELO_PLAN_VALIDO.match(limpio):
+        raise ErrorDeAjustes(
+            f"Modelo con el plan: «{limpio}» no parece un alias (sonnet, opus, haiku) ni un id de modelo.")
+    return limpio
+
+
+def _franja(texto: str) -> str:
+    limpio = texto.strip()
+    if not limpio:
+        return ""
+    try:
+        franja = leer_franja(limpio)
+    except ValueError as error:
+        raise ErrorDeAjustes(f"Franja horaria: {error}") from None
+    return texto_de_franja(franja) if franja else ""
+
+
 def _texto_decimal(d: Optional[Decimal]) -> str:
     if d is None:
         return ""
@@ -170,6 +200,7 @@ class _EventosDelLote(EventosLote):
     def error(self, texto: str) -> None: self.app.on_error(texto)
     def tick(self, total: float, restante: float) -> None: self.app.on_tick(total, restante)
     def gasto(self, usd: Decimal, consumo: Consumo) -> None: self.app.on_gasto(usd)
+    def plan(self, estado: Any) -> None: self.app.on_plan(estado)
     def terminado(self, razon: StopReason, job: Job) -> None: self.app.on_terminado(razon, job)
 
 
@@ -187,9 +218,13 @@ class AppAvanzada:
         abrir: Callable[[Path], bool] = abrir_ruta,
         cliente_conteo: Callable[[], Any] = lambda: None,
         arrancar: bool = True,
+        comprobar_plan: Callable[..., EstadoClaude] = comprobar_claude,
     ):
         self.root = root
         self.config = config or ConfigManager.cargar()
+        fijar_idioma("es")  # esta ventana está solo en español (los textos del plan de Claude comparten el idioma de la ventana simple)
+        self._comprobar_plan = comprobar_plan
+        self._estado_plan: Optional[Any] = None
         self.probar, self.listar, self.guardar = probar, listar, guardar
         self.abrir_url, self.abrir, self.cliente_conteo = abrir_url, abrir, cliente_conteo
         self.resultado: Optional[str] = None  # None = salir; "simple" = cambiar de modo
@@ -266,6 +301,7 @@ class AppAvanzada:
             "max_tokens": S(), "concurrencia": S(), "max_error_attempts": S(),
             "pausa_entre_mensajes_sec": S(), "timeout_api_sec": S(),
             "tope_gasto_usd": S(), "precio_input_mtok": S(), "precio_output_mtok": S(),
+            "modelo_plan": S(), "franja": S(),
             "hora_limite": S(), "pausa_ciclos_sec": S(), "telegram_chat_id": S(), "retencion_dias": S(), "tema": S(),
             "usar_cache": B(), "reset_gasto_por_lote": B(), "estimar_antes_de_enviar": B(),
             "modo_continuo": B(), "auto_arranque": B(), "iniciar_minimizado": B(),
@@ -286,6 +322,8 @@ class AppAvanzada:
         self.var_modelo_info = tk.StringVar()
         self.var_precio_info = tk.StringVar()
         self.var_aviso_ajustes = tk.StringVar()
+        self.var_claude = tk.StringVar()
+        self.var_plan = tk.StringVar()
 
     def _construir(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -372,8 +410,11 @@ class AppAvanzada:
         self.radio_inmediato = ttk.Radiobutton(fila_modo, text="Inmediato", value="inmediato", variable=self.v["modo"])
         self.radio_lote = ttk.Radiobutton(fila_modo, text="Lote (-50 %, hasta 24 h)", value="lote",
                                           variable=self.v["modo"])
+        self.radio_plan = ttk.Radiobutton(fila_modo, text="Con mi plan de Claude", value="plan",
+                                          variable=self.v["modo"])
         self.radio_inmediato.pack(side="left")
         self.radio_lote.pack(side="left", padx=(14, 0))
+        self.radio_plan.pack(side="left", padx=(14, 0))
         self.boton_estimar = ttk.Button(fila_modo, text="Estimar coste", command=self.estimar_coste)
         self.boton_estimar.pack(side="right")
         self.spin_limite = ttk.Spinbox(fila_modo, from_=0, to=1_000_000, width=6, textvariable=self.var_limite)
@@ -440,6 +481,9 @@ class AppAvanzada:
                                        font=f.base, anchor="w", justify="left", wraplength=800)
         self.etiqueta_error.grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
         self.etiqueta_error.grid_remove()  # solo se ve cuando hay un error que contar
+        self.etiqueta_plan = ttk.Label(monitor, textvariable=self.var_plan, style="Sub.TLabel", wraplength=800)
+        self.etiqueta_plan.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self.etiqueta_plan.grid_remove()  # solo con el plan: cuánto cupo queda
 
         # --- Botones
         botones = ttk.Frame(tab)
@@ -462,7 +506,7 @@ class AppAvanzada:
         self.boton_exportar.pack(side="right", padx=(0, 8))
 
         self._bloqueables += [self.txt_ordenes, self.entrada_plantilla, self.boton_cargar, self.radio_inmediato,
-                              self.radio_lote, self.spin_limite]
+                              self.radio_lote, self.radio_plan, self.spin_limite]
 
     # -- Ajustes --------------------------------------------------------
 
@@ -513,6 +557,22 @@ class AppAvanzada:
         self._fila(a, 2, "Modelo", fila_modelo, estirar=True)
         ttk.Label(a, textvariable=self.var_modelo_info, style="Pequeno.TLabel", wraplength=560).grid(
             row=3, column=1, sticky="w", pady=(0, 4))
+
+        # Con el plan de Claude
+        pl = self._seccion(inter, "Con tu plan de Claude (Claude Code)")
+        ttk.Label(pl, wraplength=620, justify="left",
+                  text="Para usar tu suscripción (Pro o Max) en vez de pagar por token, elige «Con mi plan de Claude» "
+                       "en el Panel. Funciona a través de Claude Code, el programa oficial de Anthropic: tiene que estar "
+                       "instalado y con tu sesión iniciada. Si se acaba tu cupo, el programa espera a que se renueve y "
+                       "sigue solo.").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        fila_cc = ttk.Frame(pl)
+        self.boton_claude = ttk.Button(fila_cc, text="Comprobar Claude Code", command=self.comprobar_claude)
+        self.boton_claude.pack(side="left")
+        ttk.Label(fila_cc, textvariable=self.var_claude, wraplength=380, justify="left").pack(side="left", padx=(12, 0))
+        self._fila(pl, 1, "Claude Code", fila_cc, estirar=True)
+        self.combo_modelo_plan = ttk.Combobox(pl, textvariable=v["modelo_plan"], values=list(MODELOS_DEL_PLAN), width=40)
+        self._fila(pl, 2, "Modelo con el plan", self.combo_modelo_plan,
+                   "Vacío = el que traiga tu plan por defecto. Un alias (sonnet, opus, haiku) o un id completo.")
 
         # Respuesta
         r = self._seccion(inter, "Respuesta")
@@ -570,13 +630,17 @@ class AppAvanzada:
         self.entrada_hora = ttk.Entry(t_, textvariable=v["hora_limite"], width=8)
         self._fila(t_, 0, "Hora límite (HH:MM)", self.entrada_hora,
                    "Vacío = sin hora límite. En modo bucle, si lo dejas vacío se aplica 23:59.")
+        self.entrada_franja = ttk.Entry(t_, textvariable=v["franja"], width=14)
+        self._fila(t_, 2, "Franja horaria (HH:MM-HH:MM)", self.entrada_franja,
+                   "Vacío = a cualquier hora. Con 22:00-07:00 solo se envía de noche; fuera de esas horas el programa "
+                   "espera a que empiece la franja.")
         self.entrada_separador = ttk.Entry(t_, textvariable=v["separador"], width=10)
-        self._fila(t_, 2, "Separador de órdenes", self.entrada_separador)
+        self._fila(t_, 4, "Separador de órdenes", self.entrada_separador)
         self.check_bucle = ttk.Checkbutton(
             t_, text="Repetir el lote en bucle hasta la hora límite o el tope (¡gasta!)", variable=v["modo_continuo"])
-        self.check_bucle.grid(row=3, column=1, sticky="w", pady=(4, 0))
+        self.check_bucle.grid(row=5, column=1, sticky="w", pady=(4, 0))
         self.spin_pausa_ciclos = ttk.Spinbox(t_, from_=1, to=3600, width=6, textvariable=v["pausa_ciclos_sec"])
-        self._fila(t_, 4, "Pausa entre repeticiones (s)", self.spin_pausa_ciclos)
+        self._fila(t_, 6, "Pausa entre repeticiones (s)", self.spin_pausa_ciclos)
 
         # Telegram
         tg = self._seccion(inter, "Telegram (opcional)")
@@ -611,7 +675,8 @@ class AppAvanzada:
             self.combo_modelo, self.boton_modelos, self.combo_esfuerzo, self.spin_max_tokens, self.txt_sistema,
             self.check_cache, self.spin_concurrencia, self.spin_errores, self.spin_pausa_msgs, self.spin_timeout,
             self.entrada_tope, self.check_reset, self.check_estimar, self.entrada_precio_in, self.entrada_precio_out,
-            self.entrada_hora, self.entrada_separador, self.check_bucle, self.spin_pausa_ciclos,
+            self.entrada_hora, self.entrada_franja, self.entrada_separador, self.check_bucle, self.spin_pausa_ciclos,
+            self.combo_modelo_plan,
         ]
 
     # ------------------------------------------------------------------
@@ -644,6 +709,8 @@ class AppAvanzada:
         v["precio_input_mtok"].set(_texto_decimal(c.precio_input_mtok))
         v["precio_output_mtok"].set(_texto_decimal(c.precio_output_mtok))
         v["hora_limite"].set(c.hora_limite)
+        v["modelo_plan"].set(c.modelo_plan)
+        v["franja"].set(c.franja)
         v["telegram_chat_id"].set(c.telegram_chat_id)
         v["tema"].set(next((nombre for nombre, valor in TEMAS_VISIBLES.items() if valor == c.tema), "Automático"))
         v["plantilla"].set(c.plantilla)
@@ -670,6 +737,8 @@ class AppAvanzada:
             precio_input_mtok=_decimal_de_casilla(v["precio_input_mtok"].get(), "Precio de entrada", opcional=True),
             precio_output_mtok=_decimal_de_casilla(v["precio_output_mtok"].get(), "Precio de salida", opcional=True),
             hora_limite=_hora(v["hora_limite"].get()),
+            modelo_plan=_modelo_del_plan(v["modelo_plan"].get()),
+            franja=_franja(v["franja"].get()),
             telegram_chat_id=v["telegram_chat_id"].get().strip(),
             tema=TEMAS_VISIBLES.get(v["tema"].get(), self.config.tema),
             **enteros,
@@ -693,6 +762,7 @@ class AppAvanzada:
     def _enlazar_cambios(self) -> None:
         for variable in self.v.values():
             variable.trace_add("write", self._al_cambiar)
+        self.v["modo"].trace_add("write", lambda *_: None if self._cargando else self._refrescar_clave())
         for caja in (self.txt_ordenes, self.txt_sistema):
             caja.bind("<KeyRelease>", self._al_cambiar, add="+")
             caja.bind("<<Paste>>", lambda e: self._luego(10, self._al_cambiar), add="+")
@@ -717,11 +787,13 @@ class AppAvanzada:
             "o escribe los tuyos si Anthropic los ha cambiado."
             + (" Este modelo no está en el catálogo." if precios.origen != "catalogo" else "")
         )
-        lote = self.v["modo"].get() == "lote"
-        # En modo lote, la API ya procesa en paralelo y el bucle no existe: se apagan esas casillas.
-        for w in (self.spin_concurrencia, self.check_bucle, self.spin_pausa_ciclos, self.spin_pausa_msgs):
-            if not self._ocupado:
-                self._habilitar(w, not lote)
+        modo = self.v["modo"].get()
+        # En modo lote, la API ya procesa en paralelo; con el plan, las órdenes van de una en una. En ninguno de los dos
+        # existe el bucle (repetiría el lote hasta agotar el dinero o el cupo): se apagan esas casillas.
+        if not self._ocupado:
+            for w in (self.spin_concurrencia, self.check_bucle, self.spin_pausa_ciclos):
+                self._habilitar(w, modo == "inmediato")
+            self._habilitar(self.spin_pausa_msgs, modo != "lote")
 
     def _recontar(self) -> None:
         texto = self.txt_ordenes.get("1.0", "end-1c")
@@ -784,7 +856,7 @@ class AppAvanzada:
         }.get(origen, "Todavía no hay clave. Pégala aquí abajo y pulsa «Probar y guardar»."))
         self._habilitar(self.entrada_clave, origen != "entorno")
         self._habilitar(self.boton_clave, origen != "entorno")
-        if origen:
+        if origen or self.v["modo"].get() == "plan":  # con el plan no hace falta ninguna clave
             self.aviso_clave.grid_remove()
         else:
             self.aviso_clave.grid()
@@ -1026,7 +1098,9 @@ class AppAvanzada:
         self.var_estado.set("Estado: en espera")
         self._error("No se pudo estimar", texto)
 
-    def _asegurar_clave(self) -> bool:
+    def _asegurar_clave(self, plan: bool = False) -> bool:
+        if plan:
+            return True  # con el plan de Claude no hay clave de API: la sesión es la de Claude Code
         escrita = self.var_clave.get().strip()
         if escrita:
             self.guardar(escrita)
@@ -1052,7 +1126,7 @@ class AppAvanzada:
         if not ordenes:
             self._aviso("Sin órdenes", "Escribe o carga primero las órdenes que quieres enviar.")
             return False
-        if not self._asegurar_clave():
+        if not self._asegurar_clave(c.es_plan):
             return False
         if confirmar and not self._confirmar("Confirmar lote", self._texto_confirmacion(c, ordenes)):
             return False
@@ -1066,6 +1140,19 @@ class AppAvanzada:
 
     def _texto_confirmacion(self, c: Configuracion, ordenes: list[str]) -> str:
         est = estimar(c, ordenes)
+        if c.es_plan:
+            lineas = [
+                f"Órdenes: {_miles(len(ordenes))}",
+                f"Modelo: {c.nombre_de_modelo}",
+                "Modo: con tu plan de Claude (Claude Code). No se paga por token: gasta el cupo de tu plan.",
+                "Si el cupo se agota, el programa espera a que se renueve y sigue solo.",
+            ]
+            if c.franja:
+                lineas.append(f"Franja horaria: {c.franja} (fuera de ella, espera)")
+            avisos = list(dict.fromkeys(c.validar().avisos))
+            if avisos:
+                lineas += ["", "Avisos:", *[f"• {a}" for a in avisos]]
+            return "\n".join(lineas) + "\n\n¿Iniciar?"
         tope = "SIN TOPE" if c.tope_gasto_usd == 0 else formatear_usd(c.tope_gasto_usd, 2)
         lineas = [
             f"Órdenes: {_miles(len(ordenes))}",
@@ -1074,6 +1161,8 @@ class AppAvanzada:
             f"Coste máximo estimado: {formatear_usd(est.coste_maximo, 2)}",
             f"Tope de gasto: {tope}",
         ]
+        if c.franja:
+            lineas.append(f"Franja horaria: {c.franja} (fuera de ella, espera)")
         if c.modo_continuo:
             lineas.append("Bucle: SÍ (se repetirá hasta la hora límite o el tope)")
         avisos = list(dict.fromkeys([*c.validar().avisos, *est.avisos]))
@@ -1090,8 +1179,12 @@ class AppAvanzada:
         if c is None:
             return False
         # El lote manda: mezclar modelos o reenviar por la API normal un lote pagado a mitad de precio sería un accidente.
-        c = replace(c, modelo=job.modelo, modo=job.modo, system_prompt=job.system_prompt)
-        if not self._asegurar_clave():
+        if job.modo == "plan":  # (su «modelo» es el alias que se eligió, o «plan de Claude» si no se eligió ninguno)
+            c = replace(c, modo="plan", modelo_plan="" if job.modelo == MODELO_DEL_PLAN else job.modelo,
+                        system_prompt=job.system_prompt)
+        else:
+            c = replace(c, modelo=job.modelo, modo=job.modo, system_prompt=job.system_prompt)
+        if not self._asegurar_clave(c.es_plan):
             return False
         if confirmar and not self._confirmar(
                 "Reanudar lote",
@@ -1101,10 +1194,14 @@ class AppAvanzada:
         self._guardar_token_telegram()
         job.reintentar_fallidas()
         self._cargando = True
-        self.v["modelo"].set(job.modelo)
+        if job.modo == "plan":
+            self.v["modelo_plan"].set(c.modelo_plan)
+        else:
+            self.v["modelo"].set(job.modelo)
         self.v["modo"].set(job.modo)
         self._cargando = False
         self._actualizar_pistas()
+        self._refrescar_clave()
         self._log(f"Reanudando el lote {job.job_id} con {job.modelo} (modo {job.modo}).")
         self._lanzar(c, job)
         return True
@@ -1121,7 +1218,7 @@ class AppAvanzada:
         self._pintar_gasto(job.coste_total())
         self.var_exitos.set(f"Éxitos totales {EstadoMonitor.cargar().exitos}")
         self._ocupar(True)
-        self._log(f"Lote {job.job_id}: {_miles(job.total_count())} órdenes · {c.modelo} · modo {c.modo}.")
+        self._log(f"Lote {job.job_id}: {_miles(job.total_count())} órdenes · {c.nombre_de_modelo} · modo {c.modo}.")
         self._purgar(c)
         self.ejecutor.iniciar(c, job, _EventosDelLote(self))
 
@@ -1232,8 +1329,46 @@ class AppAvanzada:
         self.var_progreso.set(f"Progreso {_miles(hechas)}/{_miles(total)}")
 
     def _pintar_gasto(self, usd: Decimal) -> None:
+        plan = (self._config_en_marcha or self.config).es_plan or bool(self.job and self.job.modo == "plan")
+        self._mostrar_plan(plan)
+        if plan:  # con el plan no se paga por orden: lo que importa es cuánto cupo queda (línea de abajo)
+            self.var_gasto.set("Incluido en tu plan")
+            return
         tope = (self._config_en_marcha or self.config).tope_gasto_usd
         self.var_gasto.set(f"Gasto {formatear_usd(usd)} / {formatear_usd(tope, 2) if tope > 0 else 'sin tope'}")
+
+    def _mostrar_plan(self, visible: bool) -> None:
+        if visible:
+            self.var_plan.set(texto_del_plan(self._estado_plan))
+            self.etiqueta_plan.grid()
+        else:
+            self.etiqueta_plan.grid_remove()
+
+    def on_plan(self, estado: Any) -> None:
+        self._estado_plan = estado
+        if self.etiqueta_plan.winfo_manager():
+            self.var_plan.set(texto_del_plan(estado))
+
+    # -- Claude Code ----------------------------------------------------
+
+    def comprobar_claude(self) -> None:
+        """Mira, sin bloquear la ventana, si Claude Code está instalado, con la sesión iniciada y usando un plan."""
+        self._habilitar(self.boton_claude, False)
+        self.var_claude.set("Comprobando…")
+
+        def trabajo() -> None:
+            try:
+                estado = self._comprobar_plan(self.config.ruta_claude, usar_cache=False)
+            except Exception as error:  # pragma: no cover - defensa
+                logger.exception("No se pudo comprobar Claude Code")
+                estado = EstadoClaude("error", detalle=str(error))
+            self.bridge.post(self._claude_comprobado, estado)
+
+        threading.Thread(target=trabajo, daemon=True, name="comprobar-claude").start()
+
+    def _claude_comprobado(self, estado: EstadoClaude) -> None:
+        self._habilitar(self.boton_claude, True)
+        self.var_claude.set(estado.explicacion())
 
     def _pintar_error(self, texto: str) -> None:
         self.var_error.set(f"Último error: {texto}" if texto else "")
@@ -1316,14 +1451,26 @@ class AppAvanzada:
         if not self._visible():
             return  # en la bandeja ya avisó el escritorio / Telegram
         e = job.estadisticas()
+        coste = "incluido en tu plan" if job.modo == "plan" else formatear_usd(e["coste_usd"])
         resumen = (f"Completadas {_miles(e['completadas'])}/{_miles(e['total'])} · fallidas {e['fallidas']} · "
                    f"rechazadas {e['rechazadas']} · pendientes {e['pendientes']}\n"
-                   f"Coste de este lote: {formatear_usd(e['coste_usd'])}")
+                   f"Coste de este lote: {coste}")
         if razon is StopReason.COMPLETED:
             if e["fallidas"]:
                 self._aviso("Lote terminado con fallos", f"{frase}\n\n{resumen}\n\nPuedes pulsar «Reintentar fallidas».")
             else:
                 self._info("Lote terminado", f"{frase}\n\n{resumen}")
+            return
+        if job.modo == "plan":  # (el detalle de abajo ya dice qué pasó y qué hacer: nada de saldo ni de consola de la API)
+            pista = {
+                StopReason.EXTRA_USAGE: "\n\nTu plan se agotó y Claude Code empezó a gastar créditos extra (de pago). "
+                                        f"Se paró para no gastarlos. Mira tu uso en {URL_USO_DEL_PLAN}; cuando el plan se "
+                                        "renueve, pulsa «Reanudar».",
+                StopReason.STOPPED: "\n\nPulsa «Reanudar» para continuar donde se quedó.",
+                StopReason.DEADLINE: "\n\nPulsa «Reanudar» para continuar donde se quedó.",
+            }.get(razon, "")
+            detalle = f"\n\nDetalle: {self._ultimo_error}" if self._ultimo_error else ""
+            self._aviso("Lote detenido", f"{frase}\n\n{resumen}{pista}{detalle}")
             return
         pista = {
             StopReason.NO_CREDIT: f"\n\nAñade saldo en {URL_FACTURACION} y pulsa «Reanudar».",

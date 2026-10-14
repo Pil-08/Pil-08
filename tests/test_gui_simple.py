@@ -280,8 +280,11 @@ class TestSeleccion:
 
 class TestEstadosYEsperas:
     def test_formato_de_la_cuenta_atras(self):
-        assert [simple.formatear_tiempo(s) for s in (0, 5, 59.6, 60, 75.2, 3600)] == [
-            "0:00", "0:05", "1:00", "1:00", "1:15", "60:00"]
+        assert [simple.formatear_tiempo(s) for s in (0, 5, 59.6, 60, 75.2)] == ["0:00", "0:05", "1:00", "1:00", "1:15"]
+
+    def test_las_esperas_largas_del_plan_se_cuentan_en_horas_y_dias(self):
+        assert [simple.formatear_tiempo(s) for s in (3599.4, 3600, 3725, 5 * 3600 + 7, 86400, 93600 + 61)] == [
+            "59:59", "1:00:00", "1:02:05", "5:00:07", "1 d 0:00:00", "1 d 2:01:01"]
 
     def test_la_espera_por_limite_se_cuenta_en_pantalla_y_continua_sola(self, raiz, con_clave, monkeypatch):
         monkeypatch.setattr(base, "MARGEN_RATE_LIMIT_SEC", 0.0)

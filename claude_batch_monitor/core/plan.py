@@ -51,6 +51,7 @@ ESPERAS_SIN_REINICIO_SEC = (300.0, 600.0, 900.0, 1800.0)
 MAX_ESPERAS_SIN_REINICIO = 16          # unas 7 horas
 MAX_ESPERAS_SIN_REINICIO_SEMANAL = 340  # unos 7 días a razón de media hora
 MINIMO_DE_ESPERA_TRAS_VARIOS_RECHAZOS_SEC = 1800.0
+USO_DE_UNA_VENTANA_LLENA_PCT = 100.0   # de aquí en adelante, la siguiente pregunta ya no cabe en el plan
 NOMBRE_DE_LA_VENTANA = {
     "sesion": "la sesión de 5 horas",
     "semana": "la semana",
@@ -175,7 +176,8 @@ class PlanEngine(EngineBase):
         total = self.job.total_count()
         cont = Contadores()
         while True:
-            if self._debe_parar() or not self._esperar_franja(cb) or not self._esperar_si_bloqueado(cb):
+            if (self._debe_parar() or not self._esperar_franja(cb) or not self._esperar_si_bloqueado(cb)
+                    or not self._vigilar_el_uso_extra(cb)):
                 return False
             cb.emit("inicio_orden", msg)
             cb.emit("estado", f"[Ciclo {ciclo} | Orden {msg.id}/{total}] Preguntando a Claude Code…", True)
@@ -418,22 +420,51 @@ class PlanEngine(EngineBase):
             return True
         return self._esperar_plan(hasta, "", cb, True)
 
-    def _esperar_plan(self, hasta: datetime, ventana: str, cb: Callbacks, exacta: bool) -> bool:
+    def _esperar_plan(self, hasta: datetime, ventana: str, cb: Callbacks, exacta: bool, por_el_extra: bool = False) -> bool:
         segundos = (hasta - datetime.now(timezone.utc)).total_seconds()
         local = hasta.astimezone()
         cual = NOMBRE_DE_LA_VENTANA.get(ventana, "")
         dia = "" if local.date() == datetime.now().astimezone().date() else f" del {local:%d/%m}"
         cuando = f"a las {local:%H:%M}{dia}" if exacta else f"en unos {_duracion(segundos)}"
-        texto = (f"Has llegado al límite de tu plan{f' ({cual})' if cual else ''}. "
-                 f"Sigo solo {cuando} (faltan {_duracion(segundos)}).")
+        if por_el_extra:
+            texto = (f"Tu plan está al 100 %{f' ({cual})' if cual else ''} y tienes activado el uso extra, que se paga con "
+                     f"créditos. Para no gastarlos espero a que se renueve: sigo {cuando} (faltan {_duracion(segundos)}).")
+        else:
+            texto = (f"Has llegado al límite de tu plan{f' ({cual})' if cual else ''}. "
+                     f"Sigo solo {cuando} (faltan {_duracion(segundos)}).")
         logger.info(texto)
         cb.emit("espera", "plan", max(0.0, segundos))
         cb.emit("estado", texto, False)
-        self._avisar("Límite del plan alcanzado", texto)
+        self._avisar("Plan al 100 %" if por_el_extra else "Límite del plan alcanzado", texto)
         if not self._esperar_hasta(hasta, cb):
             return False
         self._desbloquear()
         return True
+
+    def _vigilar_el_uso_extra(self, cb: Callbacks) -> bool:
+        """Mirar antes de preguntar: ¿la siguiente pregunta se serviría con créditos extra? False si se interrumpió.
+
+        Si la última respuesta dijo que una ventana del plan está al 100 % y la cuenta tiene el uso extra (de pago)
+        activado, Claude Code seguiría respondiendo con créditos. Se espera a que esa ventana se renueve (la más
+        lejana, si hay dos). No se sabe nada antes de la primera respuesta de la ejecución, ni si Claude Code no dice el
+        uso o la hora de renovación: para esos casos queda la parada en cuanto avisa de que gasta créditos extra.
+        """
+        plan = self.plan
+        if plan.extra_activado is not True:
+            return True
+        ahora = datetime.now(timezone.utc)
+        llenas = [(nombre, v) for nombre, v in (("sesion", plan.sesion), ("semana", plan.semana))
+                  if v.uso is not None and v.uso >= USO_DE_UNA_VENTANA_LLENA_PCT
+                  and v.reinicia is not None and v.reinicia > ahora]
+        if not llenas:
+            return True
+        nombre, ventana = max(llenas, key=lambda x: x[1].reinicia)  # type: ignore[arg-type, return-value]
+        hasta = ventana.reinicia + timedelta(seconds=MARGEN_TRAS_EL_REINICIO_SEC)  # type: ignore[operator]
+        self._bloquear(hasta)
+        seguir = self._esperar_plan(hasta, nombre, cb, True, por_el_extra=True)
+        for _, v in llenas:   # lo que se sabía de esas ventanas ya no vale: la próxima respuesta lo dirá
+            v.uso = v.reinicia = None
+        return seguir
 
     def _bloquear(self, hasta: datetime) -> None:
         self.plan.bloqueado_hasta = hasta

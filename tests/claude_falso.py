@@ -20,6 +20,11 @@ al acabarse, se repite el último. Sin marca, responde bien.
   semanal(S)        límite semanal
   limite_sin_hora   límite sin evento y sin hora de vuelta
   extra             respuesta correcta, pero Claude Code ya gastó créditos extra (isUsingOverage)
+  lleno(S)          respuesta correcta, pero el plan queda al 100 % (la ventana de 5 horas vuelve dentro de S segundos) y la
+                    cuenta tiene el uso extra (de pago) activado: la siguiente pregunta se serviría con créditos
+  lleno_sin_extra(S)  lo mismo con el uso extra desactivado (la siguiente se rechazaría, no se cobraría)
+  casi_lleno(S)     lo mismo que `lleno` pero al 99 %: aún cabe una pregunta más en el plan
+  lleno_semana(S)   lo mismo que `lleno` pero con la ventana semanal (la de 5 horas queda al 13 %)
   creditos          el plan no tiene más uso incluido y piden créditos (credits_required)
   gasto             límite de gasto mensual de la cuenta
   auth              sesión caducada
@@ -100,12 +105,17 @@ def _uso(entrada: int, salida: int) -> dict:
 
 
 def _evento_de_limite(estado: str, reinicio: Optional[float], tipo: str = "five_hour", extra: Optional[dict] = None,
-                      usando_extra: bool = False, ventanas: bool = True) -> dict:
+                      usando_extra: bool = False, ventanas: bool = True, uso_sesion: float = 0.13,
+                      uso_semana: float = 0.02, extra_activado: bool = False) -> dict:
     info: dict[str, Any] = {"status": estado, "rateLimitType": tipo, "overageStatus": "rejected",
                             "overageDisabledReason": "out_of_credits", "isUsingOverage": usando_extra}
+    if extra_activado:  # la cuenta tiene créditos extra: así lo cuenta Claude Code cuando el uso extra está disponible
+        info["overageStatus"] = "allowed"
+        info.pop("overageDisabledReason")
+        info["overageResetsAt"] = int(time.time()) + 20 * 86400
     if ventanas:
-        info["unifiedWindows"] = {"five_hour": {"utilization": 0.13, "resetsAt": int(time.time()) + 4 * 3600},
-                                  "seven_day": {"utilization": 0.02, "resetsAt": int(time.time()) + 6 * 86400}}
+        info["unifiedWindows"] = {"five_hour": {"utilization": uso_sesion, "resetsAt": int(time.time()) + 4 * 3600},
+                                  "seven_day": {"utilization": uso_semana, "resetsAt": int(time.time()) + 6 * 86400}}
     if reinicio is not None:
         info["resetsAt"] = int(reinicio)
         if tipo in info.get("unifiedWindows", {}):
@@ -116,7 +126,7 @@ def _evento_de_limite(estado: str, reinicio: Optional[float], tipo: str = "five_
 
 def _responder(pregunta: str, sesion: str, salida: int, texto: Optional[str] = None, stop: str = "end_turn",
                con_evento: bool = True, usando_extra: bool = False, con_resultado: bool = True,
-               origen_clave: str = "none", pausa: float = 0.0) -> None:
+               origen_clave: str = "none", pausa: float = 0.0, evento: Optional[dict] = None) -> None:
     texto = f"Respuesta a: {_sin_marca(pregunta)[:60]}" if texto is None else texto
     entrada = max(1, len(pregunta) // 4)
     _linea(_inicio(sesion, origen_clave))
@@ -148,7 +158,7 @@ def _responder(pregunta: str, sesion: str, salida: int, texto: Optional[str] = N
     _linea({"type": "stream_event", "event": {"type": "message_stop"}, "session_id": sesion,
             "parent_tool_use_id": None, "uuid": "0000-7"})
     if con_evento:
-        _linea(_evento_de_limite("allowed", time.time() + 4 * 3600, usando_extra=usando_extra))
+        _linea(evento or _evento_de_limite("allowed", time.time() + 4 * 3600, usando_extra=usando_extra))
     if con_resultado:
         _linea({"type": "result", "subtype": "success", "is_error": False, "api_error_status": None, "duration_ms": 12,
                 "num_turns": 1, "result": texto, "stop_reason": stop, "session_id": sesion, "total_cost_usd": 0.0005,
@@ -292,6 +302,13 @@ def principal(argv: list[str]) -> int:
         _responder(pregunta, sesion, 5, stop="refusal")
     elif paso == "extra":
         _responder(pregunta, sesion, 20, usando_extra=True)
+    elif paso in ("lleno", "lleno_sin_extra", "casi_lleno", "lleno_semana"):
+        segundos = _numero(arg, 3)
+        semanal = paso == "lleno_semana"
+        _responder(pregunta, sesion, 20, evento=_evento_de_limite(
+            "allowed", ahora + segundos, "seven_day" if semanal else "five_hour",
+            uso_sesion=0.13 if semanal else (0.99 if paso == "casi_lleno" else 1.0), uso_semana=1.0 if semanal else 0.02,
+            extra_activado=(paso != "lleno_sin_extra")))
     elif paso == "sin_resultado":
         _responder(pregunta, sesion, 20, con_resultado=False)
     elif paso == "clave":

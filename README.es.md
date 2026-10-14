@@ -6,7 +6,7 @@
 
 ¿Es una cola que «guarda lo que le pones y lo manda solo cuando la IA vuelve a estar activa»? Sí, y con las dos formas de usar Claude:
 
-- **Con tu plan de Claude (Pro/Max):** usa la sesión que ya pagas, a través de Claude Code (el programa oficial de Anthropic). **No gasta dinero por pregunta y se detiene si Claude Code empieza a usar créditos extra.** Cuando se acaba el cupo de tu plan, espera a la hora exacta en que se renueva y sigue sola (ver [Con tu plan de Claude](#con-tu-plan-de-claude-promax)).
+- **Con tu plan de Claude (Pro/Max):** usa la sesión que ya pagas, a través de Claude Code (el programa oficial de Anthropic). **No gasta dinero por pregunta; si el plan está lleno y tienes el uso extra activado, espera a que se renueve, y se detiene si Claude Code empieza a usar créditos extra.** Cuando se acaba el cupo de tu plan, espera a la hora exacta en que se renueva y sigue sola (ver [Con tu plan de Claude](#con-tu-plan-de-claude-promax)).
 - **Con una clave de la API** (de pago por uso): con el tope de gasto de siempre.
 
 ## Índice
@@ -73,7 +73,7 @@ Qué hace para quedarse **en tu plan y no en tu cartera**:
 
 - Lanza el programa `claude` **sin modificarlo**, una pregunta cada vez, con tu propia sesión. **Nunca lee, guarda ni reenvía tus credenciales.**
 - Quita `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` y los interruptores de Bedrock/Vertex/Foundry del entorno de ese proceso (si no, Claude Code usaría la clave y la cobraría en lugar de gastar tu plan). Además lee lo que dice Claude Code sobre de dónde salen sus credenciales y **se detiene al momento** si dice «clave de API».
-- Si tu cuenta tiene activado el **«uso extra»** (créditos de pago más allá del cupo), Claude Code seguiría gastándolos al agotarse el plan. El programa **se detiene en cuanto Claude Code avisa de que ha empezado a usarlos**, guardando antes la respuesta que acaba de recibir, y te lo dice. Claude Code lo avisa mientras responde, así que *una* respuesta pudo salir ya con esos créditos; para descartar incluso eso, desactiva el uso extra en los ajustes de tu cuenta de claude.ai.
+- Si tu cuenta tiene activado el **«uso extra»** (créditos de pago más allá del cupo), Claude Code seguiría gastándolos al agotarse el plan. Por eso el programa **mira antes de preguntar**: si la última respuesta dice que una ventana de tu plan (la de 5 horas o la semanal) está al 100 % y el uso extra está activado, espera a que esa ventana se renueve en vez de enviar la pregunta siguiente. Como red de seguridad, además, **se detiene en cuanto Claude Code avisa de que ha empezado a usar créditos de pago**, guardando antes la respuesta que acaba de recibir, y te lo dice. Claude Code da las dos informaciones al final de una respuesta, así que el programa no puede saberlo antes de la primera respuesta de una ejecución y *una* respuesta aún puede salir con esos créditos; para descartar incluso eso, desactiva el uso extra en los ajustes de tu cuenta de claude.ai.
 - Tu pregunta viaja por la entrada estándar y las instrucciones por un archivo, así que nada tuyo aparece en la lista de procesos; la carpeta de trabajo es una vacía y propia del programa, las herramientas y los comandos de Claude Code están desactivados y no se guarda ninguna sesión.
 - Si Claude Code avisa de un límite pero no dice cuándo vuelve, espera en pasos crecientes (de 5 a 30 minutos) y, pasado un rato largo, **se detiene explicando por qué** en vez de esperar para siempre.
 
@@ -164,7 +164,7 @@ Vale para los tres modos. Con el modo lote solo espera el *envío*: recoger los 
 |---|---|
 | **Con el plan: se acabó el cupo** (ventana de 5 horas o semanal) | Lee la hora de renovación de Claude Code, **espera hasta entonces + 90 s** y vuelve a preguntar lo mismo. No cuenta como fallo. La espera se guarda en disco. |
 | **Con el plan: avisa del límite pero no dice cuándo vuelve** | Espera en pasos crecientes (5, 10, 15, 30 min) y, pasado un rato largo (unas 7 horas; unos 7 días si era el límite semanal), **para** y te lo explica. |
-| **Con el plan: «uso extra» activado y se acabó el cupo** | **Para en cuanto Claude Code avisa** de que empezó a usar créditos de pago, guardando antes la respuesta recibida (como mucho una respuesta pudo salir ya con ellos: desactiva el uso extra en tu cuenta para descartarlo). |
+| **Con el plan: «uso extra» activado y se acabó el cupo** | **Espera a que se renueve** si la última respuesta dice que el plan está al 100 %; y **para en cuanto Claude Code avisa** de que empezó a usar créditos de pago, guardando antes la respuesta recibida (una respuesta pudo salir ya con ellos: desactiva el uso extra en tu cuenta para descartarlo). |
 | **Con el plan: te piden créditos / límite de gasto de la cuenta / cuenta en espera** | **Para** con el aviso que corresponde (y el botón *Ver mi uso*). Reanuda cuando lo arregles. |
 | **Con el plan: sesión caducada, Claude Code sin instalar o antiguo, o iniciado con una clave de API** | **Para antes de enviar** y dice qué hacer (`claude auth login`, `claude update`…). |
 | **429, límite por minuto** (peticiones o tokens) | Espera exactamente lo que indica la API (`retry-after`) y reintenta. **No cuenta como fallo.** Además frena antes de chocar si las cabeceras muestran que quedan pocos tokens. |
@@ -227,7 +227,7 @@ Con el plan, la hora de renovación **no se adivina**: sale de lo que informa Cl
 **¿Puedo abrir dos copias a la vez?** No sobre la misma carpeta de datos (ver arriba). Si de verdad las necesitas, dale a cada una su carpeta con `CLAUDE_MONITOR_HOME`.
 
 **¿Qué no puede garantizar?**
-- Con tu plan: Claude Code avisa de que empezó a usar créditos extra *mientras* responde, así que la respuesta que provoca el aviso pudo salir ya con ellos; el programa se detiene justo después. Para descartarlo, desactiva el uso extra en los ajustes de tu cuenta de claude.ai.
+- Con tu plan: Claude Code cuenta el uso del plan, y si ha empezado a usar créditos extra, al final de una respuesta. El programa espera cuando el plan está lleno y el uso extra activado, pero no sabe nada antes de la primera respuesta de una ejecución, así que una respuesta (o la que cruza la línea) pudo salir ya con créditos; el programa se detiene justo después. Para descartarlo, desactiva el uso extra en los ajustes de tu cuenta de claude.ai.
 - Con tu plan: el programa depende del formato de salida de Claude Code y de las normas de Anthropic para los planes, que no controla. Si el formato cambia y no se entiende un límite, espera en pasos y luego se detiene con una explicación; nunca inventa una hora de renovación.
 - Que un `claude` que quede vivo si matas este programa de golpe (`kill -9`, un corte de luz) se pare: acaba solo su única respuesta y la pregunta se vuelve a hacer al abrir de nuevo, así que como mucho se gasta dos veces el cupo de una respuesta.
 - Que una respuesta cuya conexión se corta *después* de que el servidor la procesara no se cobre: el programa no puede contar lo que nunca recibió. Por eso para y lo dice, en lugar de reenviar.

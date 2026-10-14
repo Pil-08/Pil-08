@@ -234,6 +234,59 @@ class TestLimiteDelPlan:
         assert time.time() - antes_de_reabrir >= 1.0
 
 
+class TestAntesDeGastarCreditosExtra:
+    """Mirar antes de preguntar: con el plan al 100 % y el uso extra activado, la siguiente pregunta iría con créditos."""
+
+    def _correr(self, preguntas, limite_s=60):
+        motivos, estados, pedidas = [], [], []
+        c = correr(preguntas, plan(), limite_s=limite_s,
+                   callbacks=Callbacks(espera=lambda m, s: (motivos.append(m), pedidas.append(s)),
+                                       estado=lambda t, o: estados.append(t)))
+        return c, motivos, estados, pedidas
+
+    def test_espera_a_que_el_plan_se_renueve_en_vez_de_preguntar(self, claude, esperas, sin_margen):
+        c, motivos, estados, pedidas = self._correr(["Una [[plan:lleno(2)]]", "Otra"])
+        assert c.razon is StopReason.COMPLETED and c.completadas == 2, (c.razon, c.errores)
+        asks = [x["t"] for x in claude.preguntas()]
+        assert len(asks) == 2 and claude.veces("Una") == 1 and claude.veces("Otra") == 1
+        assert pedidas and 0.9 <= pedidas[0] <= 2.1, pedidas             # la hora que da Claude es un segundo entero
+        assert asks[1] - asks[0] >= pedidas[0] - 0.05, "debía esperar a que se renovara antes de la segunda pregunta"
+        assert "plan" in motivos and any("al 100 %" in e and "uso extra" in e for e in estados)
+        assert EstadoMonitor.cargar().plan_bloqueado_hasta == ""              # y al volver, ya no hay bloqueo
+
+    def test_con_la_ventana_semanal_llena_tambien(self, claude, esperas, sin_margen):
+        c, _, estados, pedidas = self._correr(["Una [[plan:lleno_semana(2)]]", "Otra"])
+        assert c.razon is StopReason.COMPLETED and c.completadas == 2
+        assert pedidas and any("la semana" in e for e in estados)
+
+    def test_sin_el_uso_extra_activado_no_espera(self, claude, esperas, sin_margen):
+        """Sin créditos extra, un plan lleno solo rechazaría la pregunta: no hay nada que evitar y no se espera."""
+        c, motivos, _, _ = self._correr(["Una [[plan:lleno_sin_extra(30)]]", "Otra"], limite_s=25)
+        assert c.razon is StopReason.COMPLETED and c.completadas == 2
+        asks = [x["t"] for x in claude.preguntas()]
+        assert asks[1] - asks[0] < 10 and "plan" not in motivos
+
+    def test_al_99_por_ciento_todavia_cabe_otra_pregunta(self, claude, esperas, sin_margen):
+        c, motivos, _, _ = self._correr(["Una [[plan:casi_lleno(30)]]", "Otra"], limite_s=25)
+        assert c.razon is StopReason.COMPLETED and c.completadas == 2 and "plan" not in motivos
+
+    def test_el_bloqueo_queda_anotado_para_otra_ejecucion(self, claude, esperas, sin_margen):
+        config = plan()
+        job = Job.crear(["Una [[plan:lleno(4)]]", "Otra"], config)
+        job.save()
+        parar = {}
+
+        def espera(motivo, segundos):                       # el primer motor se cierra en plena espera
+            if motivo == "plan" and "m" in parar:
+                parar["m"].detener()
+
+        c1 = correr([], config, job=job, antes=lambda m: parar.update(m=m), callbacks=Callbacks(espera=espera))
+        assert c1.razon is StopReason.STOPPED and claude.veces("Otra") == 0
+        assert EstadoMonitor.cargar().plan_bloqueado_hasta, "debía quedar anotado hasta cuándo no se pregunta"
+        c2 = correr([], config, job=Job.load(job.job_id), limite_s=60)
+        assert c2.razon is StopReason.COMPLETED and c2.completadas == 2
+
+
 class TestLoQueNoSeEspera:
     def test_gastar_creditos_extra_para_en_el_acto_pero_no_pierde_la_respuesta(self, claude, esperas):
         c = correr(["Primera [[plan:extra]]", "Segunda"], plan())

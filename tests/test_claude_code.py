@@ -506,6 +506,29 @@ class TestLosFallos:
         assert abs((v.reinicia - datetime.now(UTC)).total_seconds() - 5400) < 5
         assert lector.plan.bloqueado_hasta == v.reinicia and lector.plan.situacion == "rejected"
 
+    def test_un_limite_de_verdad_tal_como_lo_registro_claude_code(self):
+        """Los valores son los de un registro real: la sesión de Claude Code que escribió este programa agotó sus 5 horas
+        el 13/10/2026 a las 20:24 UTC (mensaje del asistente con `error: rate_limit`, `usage_limit_reached` y HTTP 429)."""
+        ahora = datetime(2026, 10, 13, 20, 24, 36, tzinfo=UTC)
+        texto = "You've hit your session limit · resets 12:10am (UTC)"
+        evento = {"type": "rate_limit_event", "rate_limit_info": {
+            "status": "rejected", "resetsAt": 1791936600, "rateLimitType": "five_hour", "overageStatus": "rejected",
+            "overageDisabledReason": "out_of_credits", "isUsingOverage": False}}
+        inicio = {"type": "system", "subtype": "init", "apiKeySource": "none", "session_id": "s"}
+        asistente = {"type": "assistant", "error": "rate_limit", "session_id": "s", "message": {
+            "model": "<synthetic>", "role": "assistant", "type": "message", "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": texto}]}}
+        resultado = {"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429, "result": texto,
+                     "session_id": "s"}
+        con_evento = [json.dumps(x) for x in (inicio, asistente, evento, resultado)]
+        sin_evento = [json.dumps(x) for x in (inicio, asistente, resultado)]
+        for lineas in (con_evento, sin_evento):                  # con el evento y solo con el texto: la misma hora
+            lector, _, v = leer(lineas, codigo=1, ahora=ahora)
+            assert v.tipo == "limite" and v.ventana == "sesion" and v.texto == texto
+            assert v.reinicia == datetime(2026, 10, 14, 0, 10, tzinfo=UTC)
+            assert not lector.usa_clave_de_api() and not lector.plan.usando_extra
+        assert leer(con_evento, codigo=1, ahora=ahora)[0].plan.extra_activado is False
+
     def test_limite_semanal(self):
         _, _, v = leer(self.limite("You've hit your weekly limit · resets Mon 12:00am", 3 * 86400, "seven_day"), codigo=1,
                        ahora=datetime.now(UTC))

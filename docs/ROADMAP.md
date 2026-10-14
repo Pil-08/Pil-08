@@ -26,6 +26,7 @@ Anthropic's own documentation adds three facts that shaped this version: results
 
 - **A backend for subscription users** (12.4): *With my Claude plan* drives the official `claude -p` (never internal endpoints), waits for the plan's limit to renew using what Claude Code reports, keeps API-key variables out of its environment and stops at the first sign of paid extra usage.
 - **Run only between hours** (12.4): a time window such as `22:00-07:00`, in every mode.
+- **Plan mode looks before asking** (12.4): when the last answer says a plan window is at 100 % and extra usage is on, it waits for the renewal instead of letting the next question go out on paid credits (the `utilization` figures are fractions of the quota, as seen in a live run).
 - A batch is never created twice: the attempt is written down before it is made, and before any retry (this run or the next) the account's recent batches are searched for the one that may already exist.
 - A batch can be cancelled on the server (`--cancelar-lote`, or *Stop* in advanced mode).
 - One copy at a time per data folder, as the auto-resume tools do for sessions.
@@ -38,5 +39,4 @@ Anthropic's own documentation adds three facts that shaped this version: results
 3. **Receipts**: keep Anthropic's `request-id` for every answer in the export, to reconcile with the Console.
 4. **Priorities and re-ordering** in the queue; saved prompt templates.
 5. **Suggest the Batches API** (50 % cheaper) when a big queue is not urgent.
-6. **Plan mode: look before asking.** If a window is reported at 100 % and extra usage is on, wait for the reset instead of letting the next question go out on paid credits. Needs the exact meaning of the usage figures Claude Code prints, which its documentation does not give yet.
-7. **A probe instead of a parsed clock** for the plan: one tiny request every few minutes while blocked, as the auto-resume tools do, in case the reset time Claude Code reports is wrong.
+6. **A probe instead of a parsed clock** for the plan: one tiny request every few minutes while blocked, as the auto-resume tools do, in case the reset time Claude Code reports is wrong.

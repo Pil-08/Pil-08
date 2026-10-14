@@ -219,6 +219,71 @@ class TestUsaElPlan:
 
 
 # ----------------------------------------------------------------------
+# Mirar antes de preguntar: el plan al 100 % con el uso extra (de pago) activado
+# ----------------------------------------------------------------------
+
+
+class TestVigilarElUsoExtra:
+    def _motor(self):
+        from claude_batch_monitor.job import Job
+
+        config = plan()
+        return PlanEngine(config, Job.crear(["Una"], config))
+
+    def _esperas(self, monkeypatch):
+        objetivos = []
+        monkeypatch.setattr(PlanEngine, "_esperar_hasta", lambda self, instante, cb: objetivos.append(instante) or True)
+        return objetivos
+
+    def test_con_dos_ventanas_llenas_se_espera_a_la_ultima_y_se_olvida_lo_sabido(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from claude_batch_monitor.core import plan as modulo_plan
+        from claude_batch_monitor.core.base import Callbacks
+
+        motor, objetivos = self._motor(), self._esperas(monkeypatch)
+        ahora = datetime.now(timezone.utc)
+        motor.plan.extra_activado = True
+        motor.plan.sesion.uso, motor.plan.sesion.reinicia = 100.0, ahora + timedelta(hours=1)
+        motor.plan.semana.uso, motor.plan.semana.reinicia = 101.5, ahora + timedelta(days=3)
+        ultima = motor.plan.semana.reinicia
+        assert motor._vigilar_el_uso_extra(Callbacks()) is True
+        assert objetivos == [ultima + timedelta(seconds=modulo_plan.MARGEN_TRAS_EL_REINICIO_SEC)]
+        assert motor.plan.sesion.uso is None and motor.plan.semana.reinicia is None
+
+    @pytest.mark.parametrize("extra, uso, reinicia_en_s", [
+        (None, 100.0, 600),      # no se sabe si hay uso extra: no se frena (queda la parada al gastarlo)
+        (False, 100.0, 600),     # sin uso extra no se paga nada: un plan lleno solo rechazaría la pregunta
+        (True, 99.9, 600),       # todavía cabe otra pregunta
+        (True, None, 600),       # Claude Code no dijo el uso
+        (True, 100.0, None),     # ni cuándo vuelve: no hay a qué esperar
+        (True, 100.0, -60),      # la hora ya pasó: lo sabido está caducado
+    ])
+    def test_cuando_no_hay_nada_que_evitar_no_espera(self, monkeypatch, extra, uso, reinicia_en_s):
+        from datetime import datetime, timedelta, timezone
+
+        from claude_batch_monitor.core.base import Callbacks
+
+        motor, objetivos = self._motor(), self._esperas(monkeypatch)
+        motor.plan.extra_activado = extra
+        motor.plan.sesion.uso = uso
+        if reinicia_en_s is not None:
+            motor.plan.sesion.reinicia = datetime.now(timezone.utc) + timedelta(seconds=reinicia_en_s)
+        assert motor._vigilar_el_uso_extra(Callbacks()) is True and objetivos == []
+
+    def test_si_se_interrumpe_la_espera_se_para(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from claude_batch_monitor.core.base import Callbacks
+
+        motor = self._motor()
+        monkeypatch.setattr(PlanEngine, "_esperar_hasta", lambda self, instante, cb: False)
+        motor.plan.extra_activado = True
+        motor.plan.sesion.uso, motor.plan.sesion.reinicia = 100.0, datetime.now(timezone.utc) + timedelta(minutes=5)
+        assert motor._vigilar_el_uso_extra(Callbacks()) is False
+
+
+# ----------------------------------------------------------------------
 # La cola del modo simple, con el plan
 # ----------------------------------------------------------------------
 

@@ -42,6 +42,7 @@ MAX_LINEAS_AJENAS = 20
 # Si el reinicio del límite que dice Claude Code es absurdo (más lejos que esto, o ya muy pasado), no se le cree.
 MAX_DIAS_HASTA_EL_REINICIO = 40
 MARGEN_TRAS_EL_REINICIO_SEC = 90.0
+FRACCION_MAXIMA = 1.5   # hasta aquí un uso «utilization» se lee como fracción del cupo; por encima, como porcentaje
 
 # Variables del entorno que harían que Claude Code NO use tu plan sino una clave o un proveedor de pago por uso.
 VARIABLES_DE_PAGO_POR_USO = (
@@ -638,7 +639,8 @@ class LectorDeSalida:
             if isinstance(datos, dict):
                 uso = datos.get("utilization")
                 if isinstance(uso, (int, float)) and not isinstance(uso, bool) and 0 <= uso <= 1000:
-                    destino.uso = float(uso) * 100 if uso <= 1 else float(uso)  # llega como fracción: 0.13 = 13 %
+                    # Llega como fracción (0.13 = 13 %, así en la captura real); un poco por encima de 1 es pasarse del cupo, no 1 %.
+                    destino.uso = float(uso) * 100 if uso <= FRACCION_MAXIMA else float(uso)
                 destino.reinicia = _desde_epoch(datos.get("resetsAt"), ahora) or destino.reinicia
         if nombre == "five_hour" and reinicio:
             plan.sesion.reinicia = reinicio

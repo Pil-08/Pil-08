@@ -59,6 +59,7 @@ import base64
 import copy
 import csv
 import gc
+import glob
 import html
 import importlib.util
 import io
@@ -120,43 +121,43 @@ except ImportError:  # un Python sin tkinter: la terminal funciona y el arranque
 # ============================================================================
 # ÍNDICE   (cada sección empieza con un título numerado: busca su número)
 # ============================================================================
-#    1. Carpetas de datos, registro de eventos y escritura atómica       línea   164
-#    2. Trocear el texto del usuario en órdenes                          línea   296
-#    3. Franja horaria: trabajar solo entre dos horas                    línea   331
-#    4. Modelos, precios y coste                                         línea   400
-#    5. Configuración                                                    línea   722
-#    6. Estado guardado y almacén seguro de secretos                     línea   991
-#    7. El lote: órdenes, estado de cada una y guardado en disco         línea  1123
-#    8. Leer órdenes desde texto, CSV, TSV y JSONL                       línea  1523
-#    9. Respetar los límites de la API                                   línea  1719
-#   10. Exportar resultados                                              línea  1881
-#   11. Estimar el coste antes de gastar                                 línea  2056
-#   12. Avisos: escritorio y Telegram                                    línea  2176
-#   13. Sistema operativo: anti-suspensión y abrir carpetas              línea  2324
-#   14. Una sola copia del programa gastando a la vez                    línea  2466
-#   15. Motores: clasificar los errores de la API                        línea  2606
-#   16. Motores: lo común (contabilidad, esperas, guardado y parada)     línea  2830
-#   17. Motor inmediato (Messages API)                                   línea  3800
-#   18. Motor de lote (Message Batches API, mitad de precio)             línea  3991
-#   19. Plan de Claude: hablar con Claude Code (claude -p)               línea  4506
-#   20. Motor del plan de Claude (tu suscripción, sin pagar por token)   línea  5372
-#   21. Clave de API y elección de modelo                                línea  5863
-#   22. Ejecutar un lote en segundo plano (modo avanzado) y elegir el motor línea  5980
-#   23. La cola del modo simple                                          línea  6132
-#   24. Terminal (--cli)                                                 línea  6444
-#   25. Interfaz: textos en español e inglés                             línea  6941
-#   26. Interfaz: colores, tipografías y estilos                         línea  7459
-#   27. Interfaz: el icono, dibujado con código                          línea  7654
-#   28. Interfaz: ventanas y paneles comunes                             línea  7733
-#   29. Interfaz: puente entre hilos                                     línea  7904
-#   30. Interfaz: icono en la bandeja del sistema (opcional)             línea  7981
-#   31. Interfaz: respuestas con formato                                 línea  8057
-#   32. Interfaz avanzada: ventanas secundarias                          línea  8310
-#   33. Modo simple                                                      línea  8530
-#   34. Modo avanzado                                                    línea  9939
-#   35. Abrir la interfaz                                                línea 11562
-#   36. Instalar la librería de Anthropic si falta                       línea 11656
-#   37. Arranque                                                         línea 12011
+#    1. Carpetas de datos, registro de eventos y escritura atómica       línea   165
+#    2. Trocear el texto del usuario en órdenes                          línea   297
+#    3. Franja horaria: trabajar solo entre dos horas                    línea   332
+#    4. Modelos, precios y coste                                         línea   401
+#    5. Configuración                                                    línea   723
+#    6. Estado guardado y almacén seguro de secretos                     línea   992
+#    7. El lote: órdenes, estado de cada una y guardado en disco         línea  1124
+#    8. Leer órdenes desde texto, CSV, TSV y JSONL                       línea  1524
+#    9. Respetar los límites de la API                                   línea  1720
+#   10. Exportar resultados                                              línea  1882
+#   11. Estimar el coste antes de gastar                                 línea  2057
+#   12. Avisos: escritorio y Telegram                                    línea  2177
+#   13. Sistema operativo: anti-suspensión y abrir carpetas              línea  2325
+#   14. Una sola copia del programa gastando a la vez                    línea  2467
+#   15. Motores: clasificar los errores de la API                        línea  2607
+#   16. Motores: lo común (contabilidad, esperas, guardado y parada)     línea  2831
+#   17. Motor inmediato (Messages API)                                   línea  3801
+#   18. Motor de lote (Message Batches API, mitad de precio)             línea  3992
+#   19. Plan de Claude: hablar con Claude Code (claude -p)               línea  4507
+#   20. Motor del plan de Claude (tu suscripción, sin pagar por token)   línea  5403
+#   21. Clave de API y elección de modelo                                línea  5894
+#   22. Ejecutar un lote en segundo plano (modo avanzado) y elegir el motor línea  6011
+#   23. La cola del modo simple                                          línea  6163
+#   24. Terminal (--cli)                                                 línea  6475
+#   25. Interfaz: textos en español e inglés                             línea  6972
+#   26. Interfaz: colores, tipografías y estilos                         línea  7494
+#   27. Interfaz: el icono, dibujado con código                          línea  7689
+#   28. Interfaz: ventanas y paneles comunes                             línea  7768
+#   29. Interfaz: puente entre hilos                                     línea  7939
+#   30. Interfaz: icono en la bandeja del sistema (opcional)             línea  8016
+#   31. Interfaz: respuestas con formato                                 línea  8092
+#   32. Interfaz avanzada: ventanas secundarias                          línea  8345
+#   33. Modo simple                                                      línea  8565
+#   34. Modo avanzado                                                    línea  9990
+#   35. Abrir la interfaz                                                línea 11613
+#   36. Instalar la librería de Anthropic si falta                       línea 11707
+#   37. Arranque                                                         línea 12062
 # ============================================================================
 # Para leerlo en el orden en que se ejecuta: 37 (arranque), 33 (modo simple), 17 (motor inmediato).
 
@@ -4558,6 +4559,20 @@ SISTEMA_BASE = (
 # ----------------------------------------------------------------------
 
 
+def _mas_reciente_primero(patron: str) -> list[str]:
+    """Los archivos que encajan con un patrón con `*` (p. ej. todas las versiones de Node), el más nuevo primero."""
+    def momento(ruta: str) -> float:
+        try:
+            return os.path.getmtime(ruta)
+        except OSError:
+            return 0.0
+
+    try:
+        return sorted(glob.glob(patron), key=momento, reverse=True)
+    except (OSError, ValueError):
+        return []
+
+
 def _rutas_habituales() -> list[str]:
     casa = Path.home()
     if sys.platform == "win32":
@@ -4568,15 +4583,31 @@ def _rutas_habituales() -> list[str]:
             str(Path(local) / "Programs" / "claude" / "claude.exe"),
             str(casa / ".claude" / "local" / "claude.exe"),
             str(Path(datos) / "npm" / "claude.cmd"),
+            str(Path(local) / "pnpm" / "claude.cmd"),
+            str(casa / ".volta" / "bin" / "claude.exe"),
+            str(casa / "scoop" / "shims" / "claude.exe"),
         ]
     return [
         str(casa / ".local" / "bin" / "claude"),
         str(casa / ".claude" / "local" / "claude"),
         "/usr/local/bin/claude",
         "/opt/homebrew/bin/claude",
+        "/usr/bin/claude",
+        "/home/linuxbrew/.linuxbrew/bin/claude",
+        "/snap/bin/claude",
         str(casa / ".npm-global" / "bin" / "claude"),
         str(casa / ".bun" / "bin" / "claude"),
         str(casa / ".volta" / "bin" / "claude"),
+        str(casa / ".local" / "share" / "pnpm" / "claude"),
+        str(casa / "Library" / "pnpm" / "claude"),
+        str(casa / ".asdf" / "shims" / "claude"),
+        str(casa / ".local" / "share" / "mise" / "shims" / "claude"),
+        str(casa / "n" / "bin" / "claude"),
+        # Node instalado con un gestor de versiones: una carpeta por versión. Un programa abierto con doble clic no
+        # hereda el PATH de la terminal, que es donde estos gestores añaden la suya.
+        *_mas_reciente_primero(str(casa / ".nvm" / "versions" / "node" / "*" / "bin" / "claude")),
+        *_mas_reciente_primero(str(casa / ".local" / "share" / "fnm" / "node-versions" / "*" / "installation" / "bin" / "claude")),
+        *_mas_reciente_primero(str(casa / ".fnm" / "node-versions" / "*" / "installation" / "bin" / "claude")),
     ]
 
 
@@ -7128,6 +7159,8 @@ TEXTOS: dict[str, dict[str, str]] = {
         "plan_use": "Usar mi plan",
         "plan_recheck": "Comprobar de nuevo",
         "plan_install": "Cómo instalar Claude Code",
+        "plan_pick": "Elegir dónde está…",
+        "plan_pick_title": "Elige el programa «claude» (Claude Code)",
         "opt_access": "Cómo usar Claude",
         "opt_access_plan": "Con mi plan de Claude (Pro o Max)",
         "opt_access_api": "Con una clave de API (se paga por uso)",
@@ -7344,6 +7377,8 @@ TEXTOS: dict[str, dict[str, str]] = {
         "plan_use": "Use my plan",
         "plan_recheck": "Check again",
         "plan_install": "How to install Claude Code",
+        "plan_pick": "Choose where it is…",
+        "plan_pick_title": "Choose the “claude” program (Claude Code)",
         "opt_access": "How to use Claude",
         "opt_access_plan": "With my Claude plan (Pro or Max)",
         "opt_access_api": "With an API key (pay per use)",
@@ -9071,6 +9106,8 @@ class SimpleApp:
         self.boton_comprobar.pack(side="left", padx=(8, 0))
         ttk.Button(fila, text=t("plan_install"), style="Enlace.TButton",
                    command=lambda: self.abrir_url(URL_CLAUDE_CODE)).pack(side="left", padx=(8, 0))
+        ttk.Button(fila, text=t("plan_pick"), style="Enlace.TButton",
+                   command=self.elegir_ruta_de_claude).pack(side="left")
         ttk.Label(plan, text=t("plan_privacy"), style="Pequeno.TLabel", wraplength=560, justify="left").pack(
             anchor="w", pady=(18, 0))
 
@@ -9310,6 +9347,19 @@ class SimpleApp:
 
         threading.Thread(target=trabajo, daemon=True, name="comprobar-claude").start()
 
+    def elegir_ruta_de_claude(self) -> None:
+        """Claude Code en un sitio raro (el programa no lo encuentra solo): deja elegir el archivo `claude` a mano."""
+        ruta = filedialog.askopenfilename(parent=self.root, title=t("plan_pick_title"))
+        if not ruta:
+            return
+        self.config.ruta_claude = ruta
+        ConfigManager.guardar(self.config)
+        olvidar_comprobaciones()
+        if self.pantalla == "bienvenida":
+            self._comprobar_en_bienvenida()
+        else:
+            self.comprobar_plan(self._tras_comprobar_y_reanudar, usar_cache=False)
+
     def _plan_comprobado(self, estado: Optional[EstadoClaude],
                          al_terminar: Optional[Callable[[Optional[EstadoClaude]], None]] = None) -> None:
         if estado is not None:
@@ -9326,11 +9376,11 @@ class SimpleApp:
             return
         if estado.estado == "error":
             return  # no se pudo comprobar: no se alarma, el primer envío dirá la verdad
-        self._mostrar_banner(
-            texto_de_estado_claude(estado), "",
-            [(t("plan_recheck"), lambda: self.comprobar_plan(usar_cache=False)),
-             (t("plan_install"), lambda: self.abrir_url(URL_CLAUDE_CODE))],
-            "error", fijo=True)
+        botones = [(t("plan_recheck"), lambda: self.comprobar_plan(usar_cache=False)),
+                   (t("plan_install"), lambda: self.abrir_url(URL_CLAUDE_CODE))]
+        if estado.estado == "no_instalado":
+            botones.append((t("plan_pick"), self.elegir_ruta_de_claude))
+        self._mostrar_banner(texto_de_estado_claude(estado), "", botones, "error", fijo=True)
         self._banner_del_plan = True
 
     def _entrar(self) -> None:
@@ -9666,7 +9716,8 @@ class SimpleApp:
             "cuenta": (t("banner_plan_account"), "", [uso], "error"),
             "modelo": (t("banner_plan_model"), "", [opciones], "error"),
             "clave_de_api": (t("banner_plan_apikey"), "", [reintentar], "error"),
-            "no_instalado": (t("plan_no_instalado"), "", [comprobar, instalar], "error"),
+            "no_instalado": (t("plan_no_instalado"), "", [comprobar, instalar, (t("plan_pick"), self.elegir_ruta_de_claude)],
+                             "error"),
             "antiguo": (t("plan_antiguo"), "", [comprobar, instalar], "error"),
             "no_es_plan": (t("plan_no_es_plan"), "", [comprobar], "error"),
         }

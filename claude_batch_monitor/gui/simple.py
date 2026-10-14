@@ -28,7 +28,7 @@ from ..claves import (
 from ..cola import Cola, EstadoCola, EventosCola, hay_fallidas
 from ..config import MODELO_PLAN_VALIDO, TEMAS, ConfigManager, Configuracion, a_decimal
 from ..core.base import StopReason
-from ..core.claude_code import EstadoClaude, comprobar_claude
+from ..core.claude_code import EstadoClaude, comprobar_claude, olvidar_comprobaciones
 from ..ejecutor import motor_para
 from ..export import ErrorDeExportacion, exportar, leer_respuesta
 from ..franja import leer_franja, texto_de_franja
@@ -602,6 +602,8 @@ class SimpleApp:
         self.boton_comprobar.pack(side="left", padx=(8, 0))
         ttk.Button(fila, text=t("plan_install"), style="Enlace.TButton",
                    command=lambda: self.abrir_url(URL_CLAUDE_CODE)).pack(side="left", padx=(8, 0))
+        ttk.Button(fila, text=t("plan_pick"), style="Enlace.TButton",
+                   command=self.elegir_ruta_de_claude).pack(side="left")
         ttk.Label(plan, text=t("plan_privacy"), style="Pequeno.TLabel", wraplength=560, justify="left").pack(
             anchor="w", pady=(18, 0))
 
@@ -843,6 +845,19 @@ class SimpleApp:
 
         threading.Thread(target=trabajo, daemon=True, name="comprobar-claude").start()
 
+    def elegir_ruta_de_claude(self) -> None:
+        """Claude Code en un sitio raro (el programa no lo encuentra solo): deja elegir el archivo `claude` a mano."""
+        ruta = filedialog.askopenfilename(parent=self.root, title=t("plan_pick_title"))
+        if not ruta:
+            return
+        self.config.ruta_claude = ruta
+        ConfigManager.guardar(self.config)
+        olvidar_comprobaciones()
+        if self.pantalla == "bienvenida":
+            self._comprobar_en_bienvenida()
+        else:
+            self.comprobar_plan(self._tras_comprobar_y_reanudar, usar_cache=False)
+
     def _plan_comprobado(self, estado: Optional[EstadoClaude],
                          al_terminar: Optional[Callable[[Optional[EstadoClaude]], None]] = None) -> None:
         if estado is not None:
@@ -859,11 +874,11 @@ class SimpleApp:
             return
         if estado.estado == "error":
             return  # no se pudo comprobar: no se alarma, el primer envío dirá la verdad
-        self._mostrar_banner(
-            texto_de_estado_claude(estado), "",
-            [(t("plan_recheck"), lambda: self.comprobar_plan(usar_cache=False)),
-             (t("plan_install"), lambda: self.abrir_url(URL_CLAUDE_CODE))],
-            "error", fijo=True)
+        botones = [(t("plan_recheck"), lambda: self.comprobar_plan(usar_cache=False)),
+                   (t("plan_install"), lambda: self.abrir_url(URL_CLAUDE_CODE))]
+        if estado.estado == "no_instalado":
+            botones.append((t("plan_pick"), self.elegir_ruta_de_claude))
+        self._mostrar_banner(texto_de_estado_claude(estado), "", botones, "error", fijo=True)
         self._banner_del_plan = True
 
     def _entrar(self) -> None:
@@ -1199,7 +1214,8 @@ class SimpleApp:
             "cuenta": (t("banner_plan_account"), "", [uso], "error"),
             "modelo": (t("banner_plan_model"), "", [opciones], "error"),
             "clave_de_api": (t("banner_plan_apikey"), "", [reintentar], "error"),
-            "no_instalado": (t("plan_no_instalado"), "", [comprobar, instalar], "error"),
+            "no_instalado": (t("plan_no_instalado"), "", [comprobar, instalar, (t("plan_pick"), self.elegir_ruta_de_claude)],
+                             "error"),
             "antiguo": (t("plan_antiguo"), "", [comprobar, instalar], "error"),
             "no_es_plan": (t("plan_no_es_plan"), "", [comprobar], "error"),
         }

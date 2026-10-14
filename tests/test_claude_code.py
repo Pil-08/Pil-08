@@ -43,6 +43,7 @@ AHORA = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
 
 
 def ejecutable(carpeta: Path, nombre: str = "claude") -> Path:
+    carpeta.mkdir(parents=True, exist_ok=True)
     ruta = carpeta / nombre
     ruta.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     ruta.chmod(0o755)
@@ -95,6 +96,23 @@ class TestBuscarClaude:
     def test_sin_nada_no_lo_encuentra(self):
         assert buscar_claude() is None
         assert buscar_claude("") is None
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="las rutas de Node con gestor de versiones son de Linux y macOS")
+    def test_node_con_un_gestor_de_versiones_se_encuentra_aunque_el_path_no_lo_tenga(self, tmp_path, monkeypatch):
+        """Un programa abierto con doble clic no hereda el PATH de la terminal, donde nvm y fnm añaden su carpeta."""
+        monkeypatch.undo()  # la autouse de arriba vacía las rutas habituales: aquí se prueban de verdad
+        monkeypatch.delenv(cc.VARIABLE_RUTA, raising=False)
+        monkeypatch.setattr(cc.shutil, "which", lambda nombre: None)
+        monkeypatch.setattr(cc.Path, "home", classmethod(lambda cls: tmp_path))
+        antigua = ejecutable(tmp_path / ".nvm/versions/node/v18.19.0/bin")
+        nueva = ejecutable(tmp_path / ".nvm/versions/node/v22.11.0/bin")
+        os.utime(antigua, (1_000_000, 1_000_000))
+        os.utime(nueva, (2_000_000, 2_000_000))
+        assert buscar_claude() == str(nueva)                      # la versión de Node más reciente
+        fnm = ejecutable(tmp_path / ".local/share/fnm/node-versions/v20.0.0/installation/bin")
+        nueva.unlink()
+        antigua.unlink()
+        assert buscar_claude() == str(fnm)
 
     def test_las_rutas_habituales_no_dependen_del_sistema_para_no_fallar(self, monkeypatch):
         monkeypatch.undo()  # la autouse de arriba las vacía: aquí se prueban de verdad

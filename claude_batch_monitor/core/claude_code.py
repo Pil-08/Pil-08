@@ -13,6 +13,7 @@ Lo que se vigila, porque es lo que haría pagar de más:
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import queue
@@ -71,6 +72,20 @@ SISTEMA_BASE = (
 # ----------------------------------------------------------------------
 
 
+def _mas_reciente_primero(patron: str) -> list[str]:
+    """Los archivos que encajan con un patrón con `*` (p. ej. todas las versiones de Node), el más nuevo primero."""
+    def momento(ruta: str) -> float:
+        try:
+            return os.path.getmtime(ruta)
+        except OSError:
+            return 0.0
+
+    try:
+        return sorted(glob.glob(patron), key=momento, reverse=True)
+    except (OSError, ValueError):
+        return []
+
+
 def _rutas_habituales() -> list[str]:
     casa = Path.home()
     if sys.platform == "win32":
@@ -81,15 +96,31 @@ def _rutas_habituales() -> list[str]:
             str(Path(local) / "Programs" / "claude" / "claude.exe"),
             str(casa / ".claude" / "local" / "claude.exe"),
             str(Path(datos) / "npm" / "claude.cmd"),
+            str(Path(local) / "pnpm" / "claude.cmd"),
+            str(casa / ".volta" / "bin" / "claude.exe"),
+            str(casa / "scoop" / "shims" / "claude.exe"),
         ]
     return [
         str(casa / ".local" / "bin" / "claude"),
         str(casa / ".claude" / "local" / "claude"),
         "/usr/local/bin/claude",
         "/opt/homebrew/bin/claude",
+        "/usr/bin/claude",
+        "/home/linuxbrew/.linuxbrew/bin/claude",
+        "/snap/bin/claude",
         str(casa / ".npm-global" / "bin" / "claude"),
         str(casa / ".bun" / "bin" / "claude"),
         str(casa / ".volta" / "bin" / "claude"),
+        str(casa / ".local" / "share" / "pnpm" / "claude"),
+        str(casa / "Library" / "pnpm" / "claude"),
+        str(casa / ".asdf" / "shims" / "claude"),
+        str(casa / ".local" / "share" / "mise" / "shims" / "claude"),
+        str(casa / "n" / "bin" / "claude"),
+        # Node instalado con un gestor de versiones: una carpeta por versión. Un programa abierto con doble clic no
+        # hereda el PATH de la terminal, que es donde estos gestores añaden la suya.
+        *_mas_reciente_primero(str(casa / ".nvm" / "versions" / "node" / "*" / "bin" / "claude")),
+        *_mas_reciente_primero(str(casa / ".local" / "share" / "fnm" / "node-versions" / "*" / "installation" / "bin" / "claude")),
+        *_mas_reciente_primero(str(casa / ".fnm" / "node-versions" / "*" / "installation" / "bin" / "claude")),
     ]
 
 

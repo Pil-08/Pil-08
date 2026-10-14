@@ -52,9 +52,11 @@ class Comprobador:
     def __init__(self, *estados):
         self.estados = list(estados) or [estado()]
         self.llamadas = []
+        self.rutas = []
 
     def __call__(self, ruta="", usar_cache=True):
         self.llamadas.append(usar_cache)
+        self.rutas.append(ruta)
         return self.estados[min(len(self.llamadas), len(self.estados)) - 1]
 
 
@@ -177,6 +179,59 @@ class TestBienvenida:
             if hijo.cget("text") == t("plan_install"):
                 hijo.invoke()
         assert abiertas == [comun.URL_CLAUDE_CODE]
+
+
+class TestElegirDondeEstaClaudeCode:
+    """Claude Code en un sitio raro (nvm, un disco aparte…): si no se encuentra solo, se puede señalar a mano."""
+
+    @staticmethod
+    def _programa(tmp_path):
+        elegido = tmp_path / "mi-claude"
+        elegido.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        elegido.chmod(0o755)
+        return str(elegido)
+
+    @staticmethod
+    def _botones(frame):
+        return {hijo.cget("text"): hijo for hijo in frame.winfo_children() if hijo.winfo_class() == "TButton"}
+
+    def test_desde_la_bienvenida_se_guarda_la_ruta_y_se_vuelve_a_comprobar(self, raiz, monkeypatch, tmp_path):
+        elegido = self._programa(tmp_path)
+        monkeypatch.setattr(simple.filedialog, "askopenfilename", lambda **kw: elegido)
+        comprobar = Comprobador(estado("no_instalado"), estado("ok", metodo="claude.ai"))
+        app = crear(raiz, comprobar=comprobar)
+        assert bombear(raiz, lambda: app.bienvenida_estado.cget("text") == t("plan_no_instalado"))
+        assert not activado(app.boton_usar_plan)
+        self._botones(app.boton_comprobar.master)[t("plan_pick")].invoke()
+        assert app.config.ruta_claude == elegido and ConfigManager.cargar().ruta_claude == elegido
+        assert bombear(raiz, lambda: app.bienvenida_estado.cget("text") == t("plan_ok"))
+        assert activado(app.boton_usar_plan) and comprobar.rutas[-1] == elegido and comprobar.llamadas[-1] is False
+
+    def test_si_se_cierra_el_selector_no_cambia_nada(self, raiz, monkeypatch):
+        monkeypatch.setattr(simple.filedialog, "askopenfilename", lambda **kw: "")
+        comprobar = Comprobador(estado("no_instalado"))
+        app = crear(raiz, comprobar=comprobar)
+        assert bombear(raiz, lambda: app.bienvenida_estado.cget("text") == t("plan_no_instalado"))
+        antes = len(comprobar.llamadas)
+        app.elegir_ruta_de_claude()
+        assert app.config.ruta_claude == "" and len(comprobar.llamadas) == antes
+
+    def test_el_aviso_de_que_no_esta_instalado_trae_el_boton_y_los_otros_avisos_no(self, raiz):
+        app = crear(raiz, config=con_plan(), comprobar=Comprobador(estado("no_instalado")))
+        assert bombear(raiz, lambda: banner_visible(app))
+        assert t("plan_pick") in self._botones(app.banner_botones)
+        app2 = crear(raiz, config=con_plan(), comprobar=Comprobador(estado("sin_sesion")))
+        assert bombear(raiz, lambda: banner_visible(app2))
+        assert t("plan_pick") not in self._botones(app2.banner_botones)
+
+    def test_desde_el_aviso_la_cola_sigue_sola_en_cuanto_se_encuentra(self, raiz, monkeypatch, tmp_path):
+        elegido = self._programa(tmp_path)
+        monkeypatch.setattr(simple.filedialog, "askopenfilename", lambda **kw: elegido)
+        app = crear(raiz, config=con_plan(), comprobar=Comprobador(estado("no_instalado"), estado("ok")))
+        assert bombear(raiz, lambda: banner_visible(app))
+        self._botones(app.banner_botones)[t("plan_pick")].invoke()
+        assert bombear(raiz, lambda: not banner_visible(app))
+        assert app.config.ruta_claude == elegido
 
 
 class TestArranqueConElPlan:

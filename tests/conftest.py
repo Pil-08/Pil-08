@@ -38,6 +38,9 @@ def datos_aislados(request, tmp_path, monkeypatch):
     # El idioma del equipo de quien ejecute las pruebas no puede cambiar los textos que se esperan.
     if "idioma_real" not in request.keywords:
         monkeypatch.setattr(i18n, "_codigos_del_sistema", lambda: [])
+    # Ninguna prueba lanza el `claude` de verdad (gastaría el plan de quien las ejecute): la ruta apunta a la nada,
+    # y la fixture `claude` la cambia por un `claude` de mentira.
+    monkeypatch.setenv("CLAUDE_MONITOR_CLAUDE", str(tmp_path / "no-hay-claude"))
     respuestas = tmp_path / "responses"
     respuestas.mkdir()
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path)
@@ -49,6 +52,9 @@ def datos_aislados(request, tmp_path, monkeypatch):
     monkeypatch.setattr(state, "HAS_KEYRING", False)
     for var in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         monkeypatch.delenv(var, raising=False)
+    # La marca anti-bucle de la instalación (`reiniciar_con` la deja puesta) no puede pasar de un test al siguiente ni a
+    # los procesos que éste lance: cada test empieza sin ella.
+    os.environ.pop("CLAUDE_MONITOR_YA_INSTALADO", None)
     yield tmp_path
 
 
@@ -121,9 +127,37 @@ def esperas(monkeypatch):
     pedidas: list[float] = []
     original = base.EngineBase.esperar
 
-    def esperar(self, segundos, cb):
-        pedidas.append(segundos)
-        return original(self, min(segundos, 0.02), cb)
+    def esperar(self, segundos, cb, atras=0.0):
+        pedidas.append(segundos + atras)
+        return original(self, min(segundos, 0.02), cb, atras=atras)
 
     monkeypatch.setattr(base.EngineBase, "esperar", esperar)
     return pedidas
+
+
+@pytest.fixture
+def claude(tmp_path, monkeypatch):
+    """Un `claude` de mentira (ver claude_falso.py) y el programa apuntando a él."""
+    from claude_batch_monitor.core import claude_code
+
+    from .claude_falso import ClaudeFalso
+
+    if os.name == "nt":
+        pytest.skip("el `claude` de mentira es un script de sh: estas pruebas son de Linux y macOS")
+    falso = ClaudeFalso(tmp_path / "claude_falso")
+    for nombre, valor in falso.entorno().items():
+        monkeypatch.setenv(nombre, valor)
+    for variable in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.delenv(variable, raising=False)
+    claude_code.olvidar_comprobaciones()
+    yield falso
+    claude_code.olvidar_comprobaciones()
+
+
+@pytest.fixture
+def sin_margen(monkeypatch):
+    """Tras el reinicio del límite del plan se espera 90 s por prudencia: en las pruebas, nada."""
+    from claude_batch_monitor.core import plan as modulo_plan
+
+    monkeypatch.setattr(modulo_plan, "MARGEN_TRAS_EL_REINICIO_SEC", 0.0)
+    monkeypatch.setattr(modulo_plan, "ESPERA_MINIMA_SEC", 0.05)

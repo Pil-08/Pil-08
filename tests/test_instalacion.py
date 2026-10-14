@@ -33,6 +33,13 @@ class Ejecutor:
 PEP668 = "error: externally-managed-environment\n× This environment is externally managed"
 
 
+def _usuario_de_la_api():
+    """Alguien que ya usa la API (hay configuración y no es el plan): su librería hace falta."""
+    from claude_batch_monitor.config import ConfigManager, Configuracion
+
+    ConfigManager.guardar(Configuracion())
+
+
 class TestDeteccion:
     def test_falta_cuando_no_se_puede_importar(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "anthropic", None)
@@ -51,6 +58,7 @@ class TestDeteccion:
         (["--cli", "--listar"], True, False),
     ])
     def test_cuando_se_necesita(self, argv, terminal, esperado):
+        _usuario_de_la_api()
         assert ins.necesita_la_libreria(argv, terminal) is esperado
 
 
@@ -181,20 +189,18 @@ class TestReiniciar:
         llamadas = []
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setattr(os, "execv", lambda programa, orden: llamadas.append((programa, orden)))
-        monkeypatch.delenv(ins.VARIABLE_REINTENTO, raising=False)
+        monkeypatch.setenv(ins.VARIABLE_REINTENTO, "")     # (al terminar se restaura a «no está»; con delenv se volvería a poner)
         ins.reiniciar_con("/otro/python")
         assert llamadas[0][0] == "/otro/python" and llamadas[0][1][0] == "/otro/python"
         assert os.environ[ins.VARIABLE_REINTENTO] == "1"
-        monkeypatch.delenv(ins.VARIABLE_REINTENTO)
 
     def test_en_windows_lanza_otro_proceso(self, monkeypatch):
         lanzados = []
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr(ins.subprocess, "Popen", lambda orden: lanzados.append(orden))
         monkeypatch.setattr(os, "execv", lambda *a: pytest.fail("execv no sustituye el proceso en Windows"))
-        monkeypatch.delenv(ins.VARIABLE_REINTENTO, raising=False)
+        monkeypatch.setenv(ins.VARIABLE_REINTENTO, "")
         assert ins.reiniciar_con("py.exe") == 0 and lanzados[0][0] == "py.exe"
-        monkeypatch.delenv(ins.VARIABLE_REINTENTO)
 
 
 class TestTerminal:

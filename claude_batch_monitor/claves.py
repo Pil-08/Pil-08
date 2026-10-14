@@ -20,13 +20,15 @@ class ErrorDeClave(Exception):
 
     def __init__(self, tipo: str, detalle: str = ""):
         super().__init__(detalle or tipo)
-        self.tipo = tipo  # invalida | sin_conexion | otro
+        self.tipo = tipo  # invalida | sin_conexion | libreria | otro
         self.detalle = detalle
 
 
 def _crear_cliente(clave: str) -> Any:
-    import anthropic
-
+    try:
+        import anthropic
+    except ImportError as error:  # solo pasa si se eligió la API sin haber instalado su librería
+        raise ErrorDeClave("libreria") from error
     return anthropic.Anthropic(api_key=clave, timeout=15, max_retries=0)
 
 

@@ -5,6 +5,7 @@ Nada de esto es imprescindible. Si falla, se registra y el lote sigue.
 
 from __future__ import annotations
 
+import atexit
 import html
 import json
 import os
@@ -116,9 +117,40 @@ def notificar_escritorio(titulo: str, mensaje: str) -> bool:
         return False
 
 
+# Los avisos que han salido y todavía no han terminado, para dejarlos acabar al cerrar el programa.
+_AVISOS_EN_CURSO: list[threading.Thread] = []
+_CERROJO_DE_AVISOS = threading.Lock()
+ESPERA_AL_SALIR_SEC = 4.0
+
+
+def esperar_avisos_pendientes(limite: float = ESPERA_AL_SALIR_SEC) -> None:
+    """Deja acabar los avisos que acaban de salir antes de que Python se apague (como mucho `limite` segundos).
+
+    Cada aviso corre en un hilo aparte que, antes de enviar nada, consulta el llavero del sistema (código nativo). Si el
+    intérprete empieza a cerrarse justo cuando ese hilo está dentro de ese código, el proceso entero aborta con
+    «FATAL: exception not rethrown» (señal SIGABRT) y se pierde el código de salida con el que iba a terminar: pasaba
+    en 5 de cada 200 cierres hechos a los pocos milisegundos de un aviso, con el equipo ocupado. Se llama sola al salir.
+    """
+    fin = time.monotonic() + limite
+    with _CERROJO_DE_AVISOS:
+        pendientes = list(_AVISOS_EN_CURSO)
+    for hilo in pendientes:
+        resto = fin - time.monotonic()
+        if resto <= 0:
+            break
+        hilo.join(timeout=resto)
+
+
+atexit.register(esperar_avisos_pendientes)
+
+
 def notificar(titulo: str, mensaje: str, chat_id_config: str = "") -> None:
     """Escritorio + Telegram (este en un hilo aparte para no frenar el lote)."""
     notificar_escritorio(titulo, mensaje)
-    threading.Thread(
-        target=enviar_telegram, args=(titulo, mensaje, chat_id_config), daemon=True
-    ).start()
+    hilo = threading.Thread(
+        target=enviar_telegram, args=(titulo, mensaje, chat_id_config), daemon=True, name="aviso"
+    )
+    hilo.start()
+    with _CERROJO_DE_AVISOS:
+        _AVISOS_EN_CURSO[:] = [h for h in _AVISOS_EN_CURSO if h.is_alive()]
+        _AVISOS_EN_CURSO.append(hilo)

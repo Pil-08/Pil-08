@@ -176,7 +176,8 @@ class TestNoEsconde:
                 assert len(n.value) < 2500 or n.lineno <= 3, f"línea {n.lineno}: cadena demasiado larga"
 
     def test_las_direcciones_web_son_solo_las_conocidas(self):
-        permitidas = {"api.telegram.org", "platform.claude.com", "www.python.org"}
+        # (claude.ai: la página de uso del plan; code.claude.com: cómo instalar Claude Code. Solo se abren si la persona pulsa.)
+        permitidas = {"api.telegram.org", "platform.claude.com", "www.python.org", "claude.ai", "code.claude.com"}
         texto = ARCHIVO.read_text(encoding="utf-8")
         servidores = set(re.findall(r"https?://([A-Za-z0-9.-]+)", texto))
         assert servidores <= permitidas, servidores - permitidas

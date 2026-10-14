@@ -186,6 +186,8 @@ class BatchEngine(EngineBase):
 
         if not self._cabe_en_el_tope(pendientes, cb):
             return
+        if not self._esperar_franja(cb):  # (recoger resultados no es enviar: solo el envío espera a la franja)
+            return
 
         peticiones = [
             {"custom_id": custom_id(m), "params": build_request_params(self.config, m.text)}

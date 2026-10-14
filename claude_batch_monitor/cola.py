@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 
 from .config import Configuracion
 from .core.base import Callbacks, StopReason
-from .core.sequential import SequentialEngine
+from .ejecutor import motor_para
 from .job import STATUS_FAILED, STATUS_PENDING, STATUS_SKIPPED, Job, JobMessage, listar_jobs
 from .paths import logger
 from .platform_utils import KeepAwake
@@ -33,11 +33,12 @@ class EstadoCola:
     """Qué está haciendo la cola ahora mismo (lo que se le cuenta a la persona)."""
 
     tipo: str = "idle"  # idle | sending | waiting | paused | stopped
-    motivo: str = ""    # waiting: rate_limit | server | sin_conexion | cuota
+    motivo: str = ""    # waiting: rate_limit | server | sin_conexion | cuota | plan | franja
     razon: Optional[StopReason] = None  # stopped: por qué
     msg_id: Optional[int] = None
     segundos: float = 0.0
     texto: str = ""     # detalle (mensaje de error de la API, ya redactado)
+    codigo: str = ""    # stopped, con el plan de Claude: el problema en una palabra (no_instalado, sin_sesion, uso_extra…)
 
 
 class EventosCola:
@@ -48,6 +49,7 @@ class EventosCola:
     def cuenta_atras(self, restante: float) -> None: ...
     def delta(self, msg_id: int, texto: str) -> None: ...
     def gasto(self, usd: Decimal) -> None: ...
+    def plan(self, estado: Any) -> None: ...  # plan de Claude: lo último que se sabe de su cupo
     def error(self, texto: str) -> None: ...
 
 
@@ -60,7 +62,7 @@ class Cola:
         config: Configuracion,
         eventos: Optional[EventosCola] = None,
         publicar: Optional[Callable[[Callable[[], None]], None]] = None,
-        fabrica: FabricaMotor = SequentialEngine,
+        fabrica: FabricaMotor = motor_para,
         job: Optional[Job] = None,
     ):
         self.config = config
@@ -111,7 +113,7 @@ class Cola:
         """La configuración con la que se envía, con los ajustes que fija el modo simple."""
         return replace(
             self.config,
-            modo="inmediato",
+            modo="plan" if self.config.es_plan else "inmediato",  # el modo lote es de la ventana avanzada
             concurrencia=1,
             streaming=True,
             pausa_entre_mensajes_sec=0,
@@ -218,7 +220,13 @@ class Cola:
                     self._set_estado(EstadoCola("paused" if self._pausada and self.pendientes() else "idle"))
                     return
                 try:
-                    motor = self._fabrica(self._config_de_envio(), self.job)
+                    envio = self._config_de_envio()
+                    if (self.job.modo, self.job.modelo) != (envio.modo, envio.nombre_de_modelo):
+                        # Cambió cómo se usa Claude (plan/clave) o el modelo: la cola lo cuenta tal como sigue ahora
+                        # (si no, exportarla o reanudarla desde la terminal diría —y haría— lo que ya no es).
+                        self.job.modo, self.job.modelo = envio.modo, envio.nombre_de_modelo
+                        self.job.save()
+                    motor = self._fabrica(envio, self.job)
                     motor.notificaciones = self.notificaciones
                 except Exception as error:
                     # Sin esto el hilo moría con la excepción sin capturar y la ventana se
@@ -231,11 +239,13 @@ class Cola:
                     self._set_estado(EstadoCola("stopped", razon=StopReason.FATAL, texto=self.ultimo_error))
                     return
                 self._motor = motor
+            problema = ""
             try:
                 # Mientras hay algo que enviar o esperando, el equipo no debe dormirse (si no, «espera sola» sería falso).
                 # En Windows esto es POR HILO, así que se activa y se suelta aquí, en el hilo que trabaja.
                 with KeepAwake():
                     razon = motor.ejecutar(self._callbacks())
+                problema = str(getattr(motor, "problema", "") or "")
             except Exception as error:  # pragma: no cover - defensa; el motor ya captura casi todo
                 logger.exception("Fallo inesperado en la cola")
                 self.ultimo_error = f"Error inesperado: {error}"
@@ -249,7 +259,7 @@ class Cola:
                 if razon is StopReason.STOPPED and self._pausada:
                     continue  # la pausa se resuelve arriba, con el estado correcto
                 self._hilo = None
-                self._set_estado(EstadoCola("stopped", razon=razon, texto=self.ultimo_error))
+                self._set_estado(EstadoCola("stopped", razon=razon, texto=self.ultimo_error, codigo=problema))
                 return
 
     def _callbacks(self) -> Callbacks:
@@ -274,6 +284,9 @@ class Cola:
         def gasto(usd: Decimal, consumo: Any) -> None:
             self._emitir(self.eventos.gasto, usd)
 
+        def plan(estado: Any) -> None:
+            self._emitir(self.eventos.plan, estado)
+
         def error(texto: str) -> None:
             self.ultimo_error = texto
             self._emitir(self.eventos.error, texto)
@@ -283,7 +296,7 @@ class Cola:
 
         return Callbacks(
             estado=estado, inicio_orden=inicio_orden, resultado=resultado, espera=espera,
-            tick=tick, gasto=gasto, error=error, delta=delta,
+            tick=tick, gasto=gasto, error=error, delta=delta, plan=plan,
         )
 
     # ------------------------------------------------------------------

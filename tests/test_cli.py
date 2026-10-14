@@ -366,6 +366,8 @@ class TestPuntoDeEntrada:
 
     def test_sin_anthropic_ofrece_instalarla_en_vez_de_morir(self, monkeypatch):
         from claude_batch_monitor import instalacion
+        from claude_batch_monitor.config import ConfigManager, Configuracion
+        ConfigManager.guardar(Configuracion())                       # quien ya usa la API
         llamadas = []
         monkeypatch.setitem(sys.modules, "anthropic", None)
         monkeypatch.setattr(instalacion, "resolver_falta_de_la_libreria", lambda terminal: llamadas.append(terminal) or 7)

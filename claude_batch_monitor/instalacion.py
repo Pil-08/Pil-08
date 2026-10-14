@@ -50,8 +50,44 @@ def falta_anthropic() -> bool:
         return True
 
 
+def _valor_de(argv: list[str], opcion: str) -> str:
+    """El valor de `--opcion valor` o `--opcion=valor` en una línea de órdenes ("" si no está)."""
+    for i, a in enumerate(argv):
+        if a == opcion and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(opcion + "="):
+            return a.split("=", 1)[1]
+    return ""
+
+
+def usa_el_plan(argv: list[str], terminal: bool) -> bool:
+    """¿Se va a trabajar con el plan de Claude (Claude Code), que no usa la librería de la API?
+
+    En la terminal lo dice `--modo plan` o el lote que se reanuda. En la ventana, el modo guardado; y la primera vez
+    (aún no hay configuración) tampoco hace falta: la pantalla de bienvenida deja elegir entre el plan y la API.
+    """
+    from .config import ConfigManager
+    from .job import Job
+
+    try:
+        if terminal:
+            modo = _valor_de(argv, "--modo")
+            if modo:
+                return modo == "plan"
+            ident = _valor_de(argv, "--reanudar")
+            job = Job.load(ident) if ident else None
+            return bool(job and job.modo == "plan")
+        if not paths.CONFIG_FILE.exists():
+            return True
+        return ConfigManager.cargar().es_plan
+    except Exception:  # pragma: no cover - si no se puede saber, se pide la librería como siempre
+        return False
+
+
 def necesita_la_libreria(argv: list[str], terminal: bool) -> bool:
-    """La ventana siempre; en la terminal, salvo estimar, listar o pedir ayuda/versión."""
+    """La ventana siempre; en la terminal, salvo estimar, listar o pedir ayuda/versión. Nunca con el plan de Claude."""
+    if usa_el_plan(argv, terminal):
+        return False
     return not terminal or not any(a.split("=", 1)[0] in _SIN_API for a in argv)
 
 

@@ -39,6 +39,7 @@ SALIDA = RAIZ / "claude_batch_monitor.py"
 SECCIONES: list[tuple[str, str]] = [
     ("paths", "Carpetas de datos, registro de eventos y escritura atómica"),
     ("parsing", "Trocear el texto del usuario en órdenes"),
+    ("franja", "Franja horaria: trabajar solo entre dos horas"),
     ("pricing", "Modelos, precios y coste"),
     ("config", "Configuración"),
     ("state", "Estado guardado y almacén seguro de secretos"),
@@ -54,9 +55,11 @@ SECCIONES: list[tuple[str, str]] = [
     ("core.base", "Motores: lo común (contabilidad, esperas, guardado y parada)"),
     ("core.sequential", "Motor inmediato (Messages API)"),
     ("core.batch", "Motor de lote (Message Batches API, mitad de precio)"),
+    ("core.claude_code", "Plan de Claude: hablar con Claude Code (claude -p)"),
+    ("core.plan", "Motor del plan de Claude (tu suscripción, sin pagar por token)"),
     ("claves", "Clave de API y elección de modelo"),
+    ("ejecutor", "Ejecutar un lote en segundo plano (modo avanzado) y elegir el motor"),
     ("cola", "La cola del modo simple"),
-    ("ejecutor", "Ejecutar un lote en segundo plano (modo avanzado)"),
     ("cli", "Terminal (--cli)"),
     ("gui.i18n", "Interfaz: textos en español e inglés"),
     ("gui.estilo", "Interfaz: colores, tipografías y estilos"),
@@ -572,7 +575,7 @@ except ImportError:  # un Python sin tkinter: la terminal funciona y el arranque
 
 CABECERA = '''\
 #!/usr/bin/env python3
-"""Claude Batch Monitor {version}: una cola de preguntas para Claude con tope de gasto.
+"""Claude Batch Monitor {version}: una cola de preguntas para Claude, con tu plan o con una clave de API.
 
 ESTE ARCHIVO ES EL PROGRAMA COMPLETO. No hace falta nada más que Python.
 
@@ -581,28 +584,37 @@ ESTE ARCHIVO ES EL PROGRAMA COMPLETO. No hace falta nada más que Python.
        (Windows y macOS: deja marcada la casilla de tcl/tk. Debian/Ubuntu: sudo apt install python3-tk)
     2. Windows: doble clic en este archivo.   Otros sistemas, en una terminal:
            python3 claude_batch_monitor.py
-    3. La primera vez ofrece instalar la única pieza externa que necesita, la librería oficial
-       `anthropic` (un botón; en la terminal, responde "s"). No instala nada más.
-    4. Pega tu clave de API, escribe tus preguntas y pulsa "Enviar". Si se acaba el saldo o se
-       alcanza un límite, la cola espera y sigue sola; nunca gasta más que el tope que pongas.
+    3. La primera pantalla pregunta cómo quieres usar Claude:
+         - "Con mi plan de Claude" (Pro/Max): necesita Claude Code (el programa oficial de Anthropic)
+           instalado y con tu sesión iniciada. No hay clave ni saldo ni nada que instalar aquí.
+         - "Con una clave de API": ofrece instalar la única pieza externa que necesita, la librería
+           oficial `anthropic` (un botón; en la terminal, responde "s"), y te pide la clave.
+    4. Escribe tus preguntas y pulsa "Enviar". Si se acaba el cupo de tu plan o se alcanza un límite,
+       la cola espera a que se renueve y sigue sola; con una clave, nunca gasta más que el tope que pongas.
 
   Terminal y servidores:   python3 claude_batch_monitor.py --cli --help
 
   In English
     One plain Python file: no packing, no obfuscation, no hidden steps. Install Python 3.9+, then
-    double-click it on Windows or run `python3 claude_batch_monitor.py` elsewhere. On first run it
-    offers to install the one library it needs (`anthropic`). Your questions go to the Claude API
-    with a spending cap you choose; waiting and retrying is automatic.
+    double-click it on Windows or run `python3 claude_batch_monitor.py` elsewhere. The first screen
+    asks how to use Claude: with your Claude plan (Pro/Max, through the Claude Code you already have
+    signed in: no key, no per-question cost) or with an API key (it offers to install the `anthropic`
+    library and asks for the key, with a spending cap you choose). Waiting for a limit to renew and
+    retrying is automatic.
 
   Librerías externas
-    Obligatoria: `anthropic`, la oficial de Anthropic (si falta, el programa se ofrece a instalarla).
+    Para usar una clave de API: `anthropic`, la oficial de Anthropic (si falta, el programa se ofrece a
+    instalarla). Con tu plan de Claude no hace falta: se usa Claude Code, que ya tienes.
     Opcionales, el programa funciona sin ellas: `keyring` (la clave en el llavero del sistema),
     `pystray` y `Pillow` (icono en la bandeja), `plyer` (avisos de escritorio).
     Todo lo demás es la biblioteca estándar de Python.
 
   Qué hace en tu ordenador
-    - Se conecta a api.anthropic.com con tu clave. Nada más, salvo avisos por Telegram si los activas
-      (api.telegram.org) y la descarga de `anthropic` desde PyPI si aceptas instalarla.
+    - Con una clave de API se conecta a api.anthropic.com. Con tu plan de Claude no se conecta a nada
+      por sí mismo: arranca `claude` (Claude Code, sin modificarlo y con tu propia sesión) y es éste
+      quien habla con Anthropic; el programa nunca ve tus credenciales. Nada más, salvo avisos por
+      Telegram si los activas (api.telegram.org) y la descarga de `anthropic` desde PyPI si aceptas
+      instalarla.
     - Guarda su configuración, las respuestas y un registro en su propia carpeta de datos
       (subcarpeta ClaudeMonitor de %APPDATA% en Windows, ~/Library/Application Support en macOS
       y ~/.config en Linux). La clave va al llavero del sistema si hay `keyring`; nunca se

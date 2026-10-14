@@ -22,6 +22,7 @@ import pytest
 from claude_batch_monitor.config import Configuracion
 from claude_batch_monitor.core.base import Callbacks, StopReason
 from claude_batch_monitor.core.batch import BatchEngine
+from claude_batch_monitor.core.plan import PlanEngine
 from claude_batch_monitor.core.sequential import SequentialEngine
 from claude_batch_monitor.job import STATUS_COMPLETED, STATUS_PENDING, STATUS_REFUSED, Job
 
@@ -75,7 +76,8 @@ def correr(
     if job is None:
         job = Job.crear(preguntas, config)
         job.save()
-    motor = (BatchEngine if config.es_lote else SequentialEngine)(config, job)
+    clase = PlanEngine if config.es_plan else (BatchEngine if config.es_lote else SequentialEngine)
+    motor = clase(config, job)
     motor.notificaciones = False
     if isinstance(motor, BatchEngine):
         motor.intervalo_min = motor.intervalo_max = 0.05

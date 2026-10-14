@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 from .config import Configuracion
 from .core.base import Callbacks, StopReason
 from .core.batch import BatchEngine
+from .core.plan import PlanEngine
 from .core.sequential import SequentialEngine
 from .job import Job, JobMessage
 from .paths import logger
@@ -33,11 +34,14 @@ class EventosLote:
     def error(self, texto: str) -> None: ...
     def tick(self, total: float, restante: float) -> None: ...
     def gasto(self, usd: Decimal, consumo: Consumo) -> None: ...
+    def plan(self, estado: Any) -> None: ...
     def terminado(self, razon: StopReason, job: Job) -> None: ...
 
 
 def motor_para(config: Configuracion, job: Job) -> Any:
-    """El motor que toca según el modo: inmediato (una petición por orden) o lote (Batches API)."""
+    """El motor que toca según el modo: inmediato (una petición por orden), lote (Batches API) o plan de Claude."""
+    if config.es_plan:
+        return PlanEngine(config, job)
     return (BatchEngine if config.es_lote else SequentialEngine)(config, job)
 
 
@@ -145,6 +149,7 @@ class EjecutorLote:
             error=lambda texto: self._entregar(eventos.error, texto),
             tick=lambda total, restante: self._entregar(eventos.tick, total, restante),
             gasto=lambda usd, consumo: self._entregar(eventos.gasto, usd, consumo),
+            plan=lambda estado: self._entregar(eventos.plan, estado),
         )
 
     def _entregar(self, metodo: Callable[..., None], *args: Any) -> None:

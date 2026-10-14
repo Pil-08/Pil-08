@@ -33,6 +33,7 @@ except ImportError:  # el arranque lo explica y ofrece instalarla (ver instalaci
 from .. import paths
 from ..config import Configuracion
 from ..export import MARCA_RESPUESTA, MARCA_SOLICITUD
+from ..franja import Franja, leer_franja, segundos_hasta_inicio, texto_de_franja
 from ..job import STATUS_COMPLETED, STATUS_FAILED, STATUS_REFUSED, Job, JobMessage
 from ..notify import notificar
 from ..parsing import limpiar_sustitutos
@@ -72,6 +73,8 @@ MAX_SIN_CONEXION_SEC = 600
 MAX_ESPERA_API_SEC = 24 * 3600
 # Veces que una misma orden puede agotar el tiempo DESPUÉS de enviarse: cada una pudo cobrarse.
 MAX_TIMEOUTS_POR_ORDEN = 3
+# Una espera hasta una hora del reloj se parte en trozos de esto: en cada uno se vuelve a mirar el reloj.
+TROZO_DE_ESPERA_SEC = 60.0
 RESPUESTA_VACIA = "(Claude devolvió una respuesta vacía.)"
 AVISO_TRUNCADA = "[ADVERTENCIA: respuesta truncada por el límite de tokens]"
 
@@ -83,6 +86,7 @@ class StopReason(str, Enum):
     BUDGET = "budget"              # tope de gasto propio
     NO_CREDIT = "no_credit"        # sin saldo (402)
     ACCOUNT_LIMIT = "account_limit"  # tope mensual del tier o límite fijado en la consola
+    EXTRA_USAGE = "extra_usage"    # plan de Claude: se agotó y Claude Code empezó a usar créditos extra (de pago)
     NETWORK = "network"
     FATAL = "fatal"
 
@@ -95,6 +99,8 @@ FRASES_DE_PARADA = {
     StopReason.BUDGET: "Detenido por el tope de gasto. Lo pagado está guardado.",
     StopReason.NO_CREDIT: "Detenido: sin saldo en la cuenta de Anthropic.",
     StopReason.ACCOUNT_LIMIT: "Detenido: límite de gasto de la cuenta de Anthropic.",
+    StopReason.EXTRA_USAGE: "Detenido: tu plan se agotó y Claude Code empezó a usar créditos extra. "
+                            "El lote queda guardado y se puede reanudar cuando el plan se renueve.",
     StopReason.NETWORK: "Detenido por un fallo de red. El lote se puede reanudar.",
     StopReason.FATAL: "Detenido por un error. Revisa el mensaje y reanuda el lote.",
 }
@@ -136,6 +142,7 @@ class Callbacks:
     espera: Optional[Callable[[str, float], None]] = None     # motivo, segundos
     inicio_orden: Optional[Callable[[JobMessage], None]] = None
     delta: Optional[Callable[[int, str], None]] = None        # id de orden, texto nuevo (streaming)
+    plan: Optional[Callable[[Any], None]] = None              # plan de Claude: lo último que se sabe de su cupo (EstadoPlan)
 
     def emit(self, nombre: str, *args: Any) -> None:
         fn = getattr(self, nombre, None)
@@ -333,13 +340,19 @@ class EngineBase:
         techo = min(30 * (2 ** min(max(intentos - 1, 0), 6)), MAX_BACKOFF_SECONDS)
         return max(1.0, random.uniform(0, techo))
 
-    def esperar(self, segundos: float, cb: Callbacks) -> bool:
-        """Espera cancelable. False si se interrumpió (parada o hora límite)."""
+    def esperar(self, segundos: float, cb: Callbacks, atras: float = 0.0) -> bool:
+        """Espera cancelable. False si se interrumpió (parada o hora límite).
+
+        `atras` son los segundos que aún quedarán esperando DESPUÉS de este trozo (una espera larga se parte en trozos,
+        ver `_esperar_hasta`): solo sirve para que la cuenta atrás que se enseña sea la de la espera entera.
+        """
         if not math.isfinite(segundos):
             segundos = 60.0  # un valor que no es un tiempo no puede dejar el programa esperando para siempre
         segundos = max(0.0, segundos)
+        atras = max(0.0, atras) if math.isfinite(atras) else 0.0
+        total = segundos + atras
         fin = time.monotonic() + segundos
-        cb.emit("tick", segundos, segundos)
+        cb.emit("tick", total, total)
         while True:
             restante = fin - time.monotonic()
             if restante <= 0:
@@ -348,7 +361,55 @@ class EngineBase:
                 return False
             if self.evento_detener.wait(min(0.5, restante)):
                 return False
-            cb.emit("tick", segundos, max(0.0, fin - time.monotonic()))
+            cb.emit("tick", total, max(0.0, fin - time.monotonic()) + atras)
+
+    def _esperar_hasta(self, instante: datetime, cb: Callbacks) -> bool:
+        """Espera hasta una hora del reloj (no «X segundos»): si el equipo se suspende en medio, al despertar sigue bien.
+
+        Un `monotonic` no cuenta el tiempo de suspensión en todos los sistemas, y una espera de horas por el
+        reinicio de un límite se pasaría. Por eso se parte en trozos y en cada uno se mira el reloj de pared.
+        """
+        def ahora() -> datetime:
+            return datetime.now(instante.tzinfo)
+
+        while True:
+            restante = (instante - ahora()).total_seconds()
+            if restante <= 0:
+                return True
+            trozo = min(restante, TROZO_DE_ESPERA_SEC)
+            if not self.esperar(trozo, cb, atras=restante - trozo):
+                return False
+
+    # ------------------------------------------------------------------
+    # Franja horaria
+    # ------------------------------------------------------------------
+
+    def _franja(self) -> Optional[Franja]:
+        try:
+            return leer_franja(self.config.franja)
+        except ValueError:
+            return None  # la validación ya lo avisó antes de empezar
+
+    def _esperar_franja(self, cb: Callbacks) -> bool:
+        """Si hay franja horaria y ahora estamos fuera, espera a que empiece. False si se interrumpió."""
+        franja = self._franja()
+        if franja is None:
+            return True
+        while not self._debe_parar():
+            ahora = datetime.now()
+            espera = segundos_hasta_inicio(franja, ahora)
+            if espera <= 0:
+                return True
+            inicio = ahora + timedelta(seconds=espera)
+            cb.emit("espera", "franja", espera)
+            cb.emit(
+                "estado",
+                f"Fuera de la franja horaria ({texto_de_franja(franja)}). Sigo a las {inicio:%H:%M}.",
+                False,
+            )
+            if not self._esperar_hasta(inicio, cb):
+                return False
+        return False
 
     # ------------------------------------------------------------------
     # Parada

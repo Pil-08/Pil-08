@@ -113,7 +113,7 @@ class SequentialEngine(EngineBase):
         total = self.job.total_count()
         cont = Contadores()
         while True:
-            if self._debe_parar() or not self._throttle_preventivo(cb):
+            if self._debe_parar() or not self._esperar_franja(cb) or not self._throttle_preventivo(cb):
                 return False
             coste_max = self.estimar_coste_maximo(msg)
             if not self._reservar(coste_max, cb):

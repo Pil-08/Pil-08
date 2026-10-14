@@ -8,12 +8,14 @@ cifra que decide si se para el lote.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Optional
 
 from . import paths
+from .franja import leer_franja
 from .parsing import DEFAULT_SEPARATOR
 from .paths import logger, write_atomic
 from .pricing import (
@@ -25,7 +27,9 @@ from .pricing import (
     soporta_esfuerzo,
 )
 
-MODOS = ("inmediato", "lote")
+MODOS = ("inmediato", "lote", "plan")  # plan = con tu plan de Claude (Pro/Max), a través de Claude Code
+MODELO_DEL_PLAN = "plan de Claude"  # cómo se llama el modelo de un lote del plan si no se eligió ninguno
+MODELO_PLAN_VALIDO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-\[\]]{0,79}$")  # un alias (sonnet) o un id; nada raro
 INTERFACES = ("simple", "avanzada")
 TEMAS = ("auto", "claro", "oscuro")  # auto = el del sistema
 MAX_TOKENS_STREAMING = 16_000  # por encima, el SDK exige streaming
@@ -68,7 +72,9 @@ class Configuracion:
     plantilla: str = ""  # envuelve cada orden; `{input}` marca el hueco (ver inputs.aplicar_plantilla)
     modelo: str = DEFAULT_MODEL
     separador: str = DEFAULT_SEPARATOR
-    modo: str = "inmediato"  # inmediato | lote (Batches API, -50 %)
+    modo: str = "inmediato"  # inmediato | lote (Batches API, -50 %) | plan (tu plan de Claude, sin pagar por token)
+    modelo_plan: str = ""    # con el plan: un alias (sonnet, opus, haiku) o un id; "" = el que traiga tu plan por defecto
+    ruta_claude: str = ""    # con el plan: dónde está el programa `claude`, si no se encuentra solo
     system_prompt: str = ""
     usar_cache: bool = True
     esfuerzo: str = ""  # "" = no enviarlo; low | medium | high | xhigh | max
@@ -87,6 +93,7 @@ class Configuracion:
     # --- Tiempos ---
     modo_continuo: bool = False  # repetir el lote en bucle (¡gasta!)
     hora_limite: str = ""        # "" = sin hora límite (en bucle se aplica 23:59)
+    franja: str = ""             # "" = a cualquier hora; "22:00-07:00" = solo entre esas horas (cruza la medianoche)
     pausa_ciclos_sec: int = DELAY_BETWEEN_CYCLES_SEC
     pausa_entre_mensajes_sec: int = 0
     timeout_api_sec: int = DEFAULT_API_TIMEOUT_SEC
@@ -112,15 +119,32 @@ class Configuracion:
     def es_lote(self) -> bool:
         return self.modo == "lote"
 
+    @property
+    def es_plan(self) -> bool:
+        return self.modo == "plan"
+
+    @property
+    def nombre_de_modelo(self) -> str:
+        """El modelo tal como se le cuenta a la persona (con el plan, el del plan si no eligió otro)."""
+        if self.es_plan:
+            return self.modelo_plan or MODELO_DEL_PLAN
+        return self.modelo
+
     def precios(self) -> Precios:
         return resolver_precios(self.modelo, self.precio_input_mtok, self.precio_output_mtok)
 
     def validar(self) -> Validacion:
         v = Validacion()
-        if not self.modelo.strip():
-            v.errores.append("Falta el modelo.")
         if self.modo not in MODOS:
             v.errores.append(f"Modo desconocido '{self.modo}'. Usa: {', '.join(MODOS)}.")
+        try:
+            leer_franja(self.franja)
+        except ValueError as error:
+            v.errores.append(str(error))
+        if self.es_plan:
+            return self._validar_plan(v)
+        if not self.modelo.strip():
+            v.errores.append("Falta el modelo.")
         if self.max_tokens < 1:
             v.errores.append("max_tokens debe ser al menos 1.")
         if self.tope_gasto_usd < 0:
@@ -156,6 +180,16 @@ class Configuracion:
             v.avisos.append("La concurrencia no aplica al modo lote (la API ya lo procesa en paralelo).")
         return v
 
+    def _validar_plan(self, v: Validacion) -> Validacion:
+        """Con el plan no se paga por token: no hay precios, ni tope de gasto, ni max_tokens que revisar."""
+        if self.modelo_plan and not MODELO_PLAN_VALIDO.match(self.modelo_plan):
+            v.errores.append(f"El modelo «{self.modelo_plan}» no parece un alias ni un id de modelo.")
+        if self.modo_continuo:
+            v.errores.append("El modo bucle no existe con el plan de Claude: repetiría el lote hasta agotar tu cupo.")
+        if self.concurrencia > 1:
+            v.avisos.append("Con el plan de Claude las órdenes se envían de una en una.")
+        return v
+
     # ------------------------------------------------------------------
 
     def a_dict(self) -> dict:
@@ -189,6 +223,8 @@ class Configuracion:
             modelo=texto("modelo", base.modelo).strip() or base.modelo,
             separador=texto("separador", base.separador).strip() or base.separador,
             modo=modo if modo in MODOS else base.modo,
+            modelo_plan=texto("modelo_plan", "").strip(),
+            ruta_claude=texto("ruta_claude", "").strip(),
             system_prompt=texto("system_prompt", ""),
             usar_cache=bool(data.get("usar_cache", base.usar_cache)),
             esfuerzo=esfuerzo if esfuerzo in NIVELES_ESFUERZO else "",
@@ -202,6 +238,7 @@ class Configuracion:
             estimar_antes_de_enviar=bool(data.get("estimar_antes_de_enviar", True)),
             modo_continuo=bool(data.get("modo_continuo", False)),
             hora_limite=texto("hora_limite", "").strip(),
+            franja=texto("franja", "").strip(),
             pausa_ciclos_sec=_int(data.get("pausa_ciclos_sec"), DELAY_BETWEEN_CYCLES_SEC, 1, 3600),
             pausa_entre_mensajes_sec=_int(data.get("pausa_entre_mensajes_sec"), 0, 0, 60),
             timeout_api_sec=_int(data.get("timeout_api_sec"), DEFAULT_API_TIMEOUT_SEC, 15, 900),

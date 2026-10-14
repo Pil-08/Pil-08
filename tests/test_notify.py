@@ -3,7 +3,13 @@
 import io
 import json
 import logging
+import os
+import subprocess
+import sys
+import threading
+import time
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +25,7 @@ from claude_batch_monitor.notify import (
 from claude_batch_monitor.state import KEY_TELEGRAM_CHAT_ID, KEY_TELEGRAM_TOKEN, SecureStorage
 
 TOKEN = "123456:SECRETO-del-bot"
+RAIZ = Path(__file__).resolve().parent.parent
 
 
 class Respuesta:
@@ -152,17 +159,92 @@ class TestEscritorio:
         hecho = []
 
         class HiloSincrono:
-            def __init__(self, target, args, daemon):
+            def __init__(self, target, args, daemon, name=""):
                 self.target, self.args = target, args
 
             def start(self):
                 self.target(*self.args)
                 hecho.append(True)
 
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                return None
+
+        monkeypatch.setattr(notify, "_AVISOS_EN_CURSO", [])
         monkeypatch.setattr(notify.threading, "Thread", HiloSincrono)
         monkeypatch.setattr(notify, "enviar_telegram", lambda t, m, c: vistos.append(("telegram", t)))
         notificar("Fin", "ok", "42")
         assert vistos == [("escritorio", "Fin"), ("telegram", "Fin")] and hecho
+
+
+class TestAlCerrar:
+    """Un aviso que acaba de salir se deja terminar antes de que Python se apague.
+
+    El hilo del aviso consulta el llavero del sistema (código nativo); si el intérprete se cerraba justo entonces, el proceso
+    abortaba con «FATAL: exception not rethrown» y perdía su código de salida (5 de cada 200 cierres, con el equipo ocupado).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _sin_avisos_ajenos(self, monkeypatch):
+        monkeypatch.setattr(notify, "_AVISOS_EN_CURSO", [])
+        monkeypatch.setattr(notify, "notificar_escritorio", lambda t, m: False)
+
+    def test_se_espera_a_un_aviso_lento(self, monkeypatch):
+        terminado = threading.Event()
+
+        def lento(*a, **k):
+            threading.Event().wait(0.3)      # (`time.sleep` está anulado en este archivo para no esperar los reintentos)
+            terminado.set()
+            return False
+
+        monkeypatch.setattr(notify, "enviar_telegram", lento)
+        notificar("t", "m")
+        assert not terminado.is_set()
+        notify.esperar_avisos_pendientes()
+        assert terminado.is_set()
+
+    def test_no_se_espera_para_siempre(self, monkeypatch):
+        parar = threading.Event()
+        monkeypatch.setattr(notify, "enviar_telegram", lambda *a, **k: parar.wait(30))
+        notificar("t", "m")
+        inicio = time.monotonic()
+        notify.esperar_avisos_pendientes(0.3)
+        assert time.monotonic() - inicio < 3.0
+        parar.set()
+
+    def test_sin_avisos_no_hay_espera(self):
+        inicio = time.monotonic()
+        notify.esperar_avisos_pendientes()
+        assert time.monotonic() - inicio < 0.5
+
+    def test_los_avisos_terminados_no_se_acumulan(self, monkeypatch):
+        monkeypatch.setattr(notify, "enviar_telegram", lambda *a, **k: False)
+        for _ in range(25):
+            notificar("t", "m")
+            for hilo in list(notify._AVISOS_EN_CURSO):
+                hilo.join()
+        notificar("t", "m")
+        assert len(notify._AVISOS_EN_CURSO) <= 2
+
+    def test_al_cerrar_el_interprete_se_deja_acabar_el_aviso(self, tmp_path):
+        """En un proceso de verdad: el programa termina nada más avisar y el aviso lento se completa igualmente."""
+        marca = tmp_path / "aviso_terminado.txt"
+        codigo = (
+            "import time\n"
+            "from claude_batch_monitor import notify\n"
+            "notify.notificar_escritorio = lambda t, m: False\n"
+            "def lento(*a, **k):\n"
+            "    time.sleep(0.5)\n"
+            f"    open({str(marca)!r}, 'w').write('listo')\n"
+            "notify.enviar_telegram = lento\n"
+            "notify.notificar('Cola detenida', 'x')\n"           # y aquí el programa se acaba
+        )
+        r = subprocess.run([sys.executable, "-c", codigo], env={**os.environ, "PYTHONPATH": str(RAIZ)},
+                           capture_output=True, text=True, cwd=str(tmp_path), timeout=60)
+        assert r.returncode == 0, r.stderr
+        assert marca.read_text() == "listo"
 
 
 class TestProbarTelegram:

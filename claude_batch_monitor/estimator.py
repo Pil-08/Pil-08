@@ -41,9 +41,17 @@ class Estimacion:
     modo: str
     max_tokens: int
     avisos: list = field(default_factory=list)
+    plan: bool = False  # con el plan de Claude no se paga por token: no hay precios ni coste máximo
 
     def resumen_lineas(self) -> list[str]:
         origen = "contados por la API" if self.exacta else "estimación local"
+        if self.plan:
+            return [
+                f"Órdenes detectadas : {self.ordenes}",
+                f"Modo               : {self.modo}",
+                f"Tokens entrada     : ~{self.tokens_entrada:,} ({origen})",
+                "Coste              : incluido en tu plan (gasta el cupo de tu plan, no dinero por token)",
+            ]
         return [
             f"Órdenes detectadas : {self.ordenes}",
             f"Modo               : {self.modo}",
@@ -79,6 +87,12 @@ def estimar(
 ) -> Estimacion:
     """Peor caso de coste para estas órdenes con esta configuración."""
     precios = config.precios()
+    if config.es_plan:
+        tokens = [estimar_tokens(o) + estimar_tokens(config.system_prompt) for o in ordenes]
+        return Estimacion(
+            ordenes=len(ordenes), tokens_entrada=sum(tokens), exacta=False, coste_maximo=Decimal(0),
+            coste_solo_entrada=Decimal(0), precios=precios, modo="plan de Claude", max_tokens=0, plan=True,
+        )
     lote = config.es_lote
     exactos = client is not None and len(ordenes) <= MAX_ORDENES_CONTEO_EXACTO
 

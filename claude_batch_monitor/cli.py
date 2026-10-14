@@ -4,7 +4,7 @@ Códigos de salida (para encadenar con `&&` o `case $?`):
 
     0  todo completado
     1  error fatal o de red, o terminó con órdenes fallidas
-    2  detenido por el tope de gasto
+    2  detenido por el tope de gasto (o porque el plan de Claude empezó a gastar créditos extra)
     3  sin saldo, o límite de gasto de la cuenta de Anthropic
     4  incompleto (hora límite o cancelado con Ctrl+C)
     5  uso incorrecto (argumentos, fichero, configuración) o ya hay otra copia del programa en marcha
@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import paths
-from .config import ConfigManager, Configuracion
+from .config import MODELO_DEL_PLAN, ConfigManager, Configuracion
 from .core.base import FRASES_DE_PARADA, Callbacks, EngineBase, StopReason
 from .core.batch import BatchEngine
-from .core.sequential import SequentialEngine
+from .ejecutor import motor_para
 from .estimator import estimar
 from .export import FORMATOS, ErrorDeExportacion, exportar
 from .inputs import ErrorDeEntrada, aplicar_plantilla, leer_ordenes
@@ -43,6 +43,7 @@ _CODIGOS = {
     StopReason.FATAL: EXIT_FALLO,
     StopReason.NETWORK: EXIT_FALLO,
     StopReason.BUDGET: EXIT_TOPE,
+    StopReason.EXTRA_USAGE: EXIT_TOPE,
     StopReason.NO_CREDIT: EXIT_SIN_SALDO,
     StopReason.ACCOUNT_LIMIT: EXIT_SIN_SALDO,
     StopReason.STOPPED: EXIT_INCOMPLETO,
@@ -99,10 +100,13 @@ def construir_parser() -> argparse.ArgumentParser:
                    help="Cancela en el servidor el lote en curso (lo ya procesado se cobra) y sale")
 
     m = p.add_argument_group("modelo")
-    m.add_argument("--modelo", help=f"Por defecto {DEFAULT_MODEL}; al reanudar, el del lote")
+    m.add_argument("--modelo", help=f"Por defecto {DEFAULT_MODEL}; al reanudar, el del lote. Con --modo plan: un alias "
+                                    "(sonnet, opus, haiku…); sin él, el que traiga tu plan por defecto")
     m.add_argument("--system", help="Prompt de sistema compartido (texto o ruta a fichero)")
-    m.add_argument("--modo", choices=("inmediato", "lote"),
-                   help="'lote' = Batches API, 50 %% más barato. Al reanudar se hereda el del lote")
+    m.add_argument("--modo", choices=("inmediato", "lote", "plan"),
+                   help="'lote' = Batches API, 50 %% más barato. 'plan' = con tu plan de Claude (Pro/Max) a través de "
+                        "Claude Code, sin pagar por token: espera sola a que el límite se renueve. "
+                        "Al reanudar se hereda el del lote")
     m.add_argument("--max-tokens", type=int, help="Tokens máximos de salida por orden (por defecto 16000)")
     m.add_argument("--esfuerzo", choices=NIVELES_ESFUERZO, help="Nivel de esfuerzo (solo en modelos que lo soportan)")
     m.add_argument("--sin-cache", action="store_true", help="Desactiva el prompt caching")
@@ -117,6 +121,7 @@ def construir_parser() -> argparse.ArgumentParser:
     t = p.add_argument_group("tiempos")
     t.add_argument("--bucle", action="store_true", help="ATENCIÓN: repite el lote hasta la hora límite o el tope")
     t.add_argument("--hora-limite", help="HH:MM. En bucle, 23:59 por defecto")
+    t.add_argument("--franja", help="Trabaja solo entre dos horas: --franja 22:00-07:00 (cruza la medianoche)")
     t.add_argument("--pausa-ciclos", type=int, default=10, help="Segundos entre ciclos del bucle")
     t.add_argument("--pausa", type=int, default=0, help="Segundos de pausa entre órdenes")
 
@@ -224,6 +229,10 @@ def _configuracion(args: argparse.Namespace, job: Optional[Job]) -> Configuracio
     # de modo que reanudar por CLI un lote creado en modo lote lo reenviaba entero por
     # la API normal, al doble de precio y sin recoger el lote ya pagado en el servidor.
     c.modo = args.modo or (job.modo if job else "inmediato")
+    if c.es_plan:  # con el plan, el «modelo» es un alias de Claude Code; en blanco = el que traiga el plan
+        heredado = job.modelo if job and job.modo == "plan" and job.modelo != MODELO_DEL_PLAN else ""
+        c.modelo_plan = args.modelo or heredado
+    c.franja = args.franja or ""
     c.system_prompt = _texto_o_fichero(args.system) if args.system is not None else (job.system_prompt if job else "")
     c.separador = args.separador
     c.usar_cache = not args.sin_cache
@@ -261,19 +270,27 @@ def _resumen_del_lote(razon: StopReason, job: Job, engine: Optional[EngineBase],
     }
 
 
-def _callbacks(salida: _Salida, args: argparse.Namespace) -> Callbacks:
+def _callbacks(salida: _Salida, args: argparse.Namespace, con_plan: bool = False) -> Callbacks:
     def estado(texto: str, activo: bool) -> None:
         salida.info(f"[{datetime.now():%H:%M:%S}] {texto}")
 
     def resultado(msg: JobMessage) -> None:
         marca = {"completed": "OK", "refused": "RECHAZADA", "failed": "FALLO"}.get(msg.status, msg.status)
         extra = f" {msg.detalle}" if msg.detalle else ""
-        salida.info(f"  orden {msg.id}: {marca} · {msg.tokens_input + msg.tokens_output} tok · "
-                    f"{formatear_usd(msg.coste_usd, 6)}{extra}")
+        coste = "" if con_plan else f" · {formatear_usd(msg.coste_usd, 6)}"   # con el plan no se paga por orden
+        salida.info(f"  orden {msg.id}: {marca} · {msg.tokens_input + msg.tokens_output} tok{coste}{extra}")
 
     def tick(total: float, restante: float) -> None:
         if salida.tty and not salida.silencioso:
             print(f"\r  esperando… {int(restante)} s ", end="", file=salida.flujo, flush=True)
+
+    ultimo_plan = [""]
+
+    def plan(estado: Any) -> None:
+        resumen = estado.resumen()
+        if resumen and resumen != ultimo_plan[0]:
+            ultimo_plan[0] = resumen
+            salida.info(f"  Tu plan: {resumen}")
 
     return Callbacks(
         estado=estado,
@@ -281,6 +298,7 @@ def _callbacks(salida: _Salida, args: argparse.Namespace) -> Callbacks:
         error=lambda texto: salida.error(texto),
         fin_ciclo=lambda c, t, n: salida.info(f"Ciclo {n} terminado: {c}/{t} completadas."),
         tick=tick,
+        plan=plan,
     )
 
 
@@ -405,7 +423,7 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
         salida.aviso(f"--limit {args.limit}: solo se procesarán las primeras {len(textos)} órdenes.")
 
     # ---- estimación ----
-    est = estimar(config, textos, client=_cliente_para_conteo() if args.dry_run else None)
+    est = estimar(config, textos, client=_cliente_para_conteo() if args.dry_run and not config.es_plan else None)
     for aviso in est.avisos:
         if aviso not in validacion.avisos:
             salida.aviso(aviso)
@@ -414,11 +432,13 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
             print(json.dumps({
                 "ordenes": est.ordenes, "modo": est.modo, "tokens_entrada": est.tokens_entrada,
                 "coste_maximo_usd": str(est.coste_maximo), "tope_gasto_usd": str(config.tope_gasto_usd),
+                "plan": est.plan,
             }, ensure_ascii=False))
         else:
             print("\n".join(est.resumen_lineas()))
-            tope = "sin tope" if config.tope_gasto_usd == 0 else formatear_usd(config.tope_gasto_usd)
-            print(f"Tope configurado   : {tope}")
+            if not est.plan:
+                tope = "sin tope" if config.tope_gasto_usd == 0 else formatear_usd(config.tope_gasto_usd)
+                print(f"Tope configurado   : {tope}")
             print("\nNo se ha enviado nada (--dry-run).")
         return EXIT_OK
     if not textos:
@@ -442,8 +462,12 @@ def _ejecutar_lote(
     if job is None:
         job = Job.crear(textos, config)
         job.save()
-        salida.info(f"Lote {job.job_id}: {len(textos)} órdenes · {config.modelo} · modo {config.modo} · "
-                    f"peor caso {formatear_usd(est.coste_maximo)}")
+        if config.es_plan:
+            modelo = f" ({config.modelo_plan})" if config.modelo_plan else ""
+            salida.info(f"Lote {job.job_id}: {len(textos)} órdenes · con tu plan de Claude{modelo} · sin coste por token")
+        else:
+            salida.info(f"Lote {job.job_id}: {len(textos)} órdenes · {config.modelo} · modo {config.modo} · "
+                        f"peor caso {formatear_usd(est.coste_maximo)}")
 
     # ---- ejecución ----
     try:
@@ -452,9 +476,8 @@ def _ejecutar_lote(
     except Exception:
         logger.exception("No se pudieron purgar los lotes antiguos")
 
-    clase = BatchEngine if config.es_lote else SequentialEngine
-    motor = clase(config, job)
-    cb = _callbacks(salida, args)
+    motor = motor_para(config, job)
+    cb = _callbacks(salida, args, con_plan=config.es_plan)
     razon = StopReason.FATAL
     try:
         with KeepAwake():
@@ -486,7 +509,10 @@ def _ejecutar_lote(
         print(f"  Completadas {resumen['completadas']}/{resumen['total']}"
               f" · fallidas {resumen['fallidas']} · rechazadas {resumen['rechazadas']}"
               f" · pendientes {resumen['pendientes']}")
-        print(f"  Coste de este lote: {formatear_usd(job.coste_total())}")
+        if config.es_plan:
+            print("  Coste de este lote: incluido en tu plan")
+        else:
+            print(f"  Coste de este lote: {formatear_usd(job.coste_total())}")
         if resumen["pendientes"] or resumen["fallidas"]:
             print(f"  Para continuar: --reanudar {job.job_id}")
     return resumen["codigo_de_salida"]

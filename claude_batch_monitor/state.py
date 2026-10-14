@@ -35,6 +35,8 @@ class EstadoMonitor:
     gasto_acumulado_usd: Decimal = Decimal(0)
     tokens_input_total: int = 0
     tokens_output_total: int = 0
+    # Plan de Claude: hasta cuándo no se puede enviar (un límite alcanzado), en ISO UTC. Sobrevive a cerrar el programa.
+    plan_bloqueado_hasta: str = ""
 
     def guardar(self, path: Optional[Path] = None) -> bool:
         """Escribe el estado. False si no se pudo (disco lleno, sin permisos…): quien gasta debe enterarse."""
@@ -46,6 +48,7 @@ class EstadoMonitor:
             "gasto_acumulado_usd": str(self.gasto_acumulado_usd),
             "tokens_input_total": self.tokens_input_total,
             "tokens_output_total": self.tokens_output_total,
+            "plan_bloqueado_hasta": self.plan_bloqueado_hasta,
         }
         try:
             write_atomic(path, json.dumps(datos, indent=2, ensure_ascii=False))
@@ -72,6 +75,7 @@ class EstadoMonitor:
                 gasto_acumulado_usd=max(Decimal(0), a_decimal(data.get("gasto_acumulado_usd"), Decimal(0))),
                 tokens_input_total=max(0, int(data.get("tokens_input_total", 0))),
                 tokens_output_total=max(0, int(data.get("tokens_output_total", 0))),
+                plan_bloqueado_hasta=str(data.get("plan_bloqueado_hasta") or ""),
             )
         except Exception:
             logger.exception("state.json ilegible; se aparta como .corrupt.json")

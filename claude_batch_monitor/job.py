@@ -142,7 +142,7 @@ class Job:
         return cls(
             uuid.uuid4().hex[:8],
             datetime.now().isoformat(),
-            config.modelo,
+            config.nombre_de_modelo,  # con el plan, el alias elegido o «plan de Claude»
             mensajes,
             separador=config.separador,
             modo=config.modo,
@@ -314,15 +314,17 @@ class Job:
         ser un accidente. Se avisa; la decisión es del usuario.
         """
         avisos: list[str] = []
-        if normalizar_id(config.modelo) != normalizar_id(self.modelo):
+        if normalizar_id(config.nombre_de_modelo) != normalizar_id(self.modelo):
             avisos.append(
                 f"El lote se creó con el modelo {self.modelo} y ahora está seleccionado "
-                f"{config.modelo}: las órdenes pendientes se responderán con otro modelo."
+                f"{config.nombre_de_modelo}: las órdenes pendientes se responderán con otro modelo."
             )
         if config.modo != self.modo:
             extra = ""
             if self.modo == "lote" and config.modo == "inmediato":
                 extra = " Se reenviaría por la API normal, al doble de precio."
+            elif self.modo == "plan":
+                extra = " Se reenviaría por la API, que se paga por token, en vez de gastar el cupo de tu plan."
             avisos.append(
                 f"El lote se creó en modo '{self.modo}' y ahora está en modo '{config.modo}'.{extra}"
             )

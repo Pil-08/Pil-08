@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Batch Monitor 12.3.0: una cola de preguntas para Claude con tope de gasto.
+"""Claude Batch Monitor 12.3.0: una cola de preguntas para Claude, con tu plan o con una clave de API.
 
 ESTE ARCHIVO ES EL PROGRAMA COMPLETO. No hace falta nada más que Python.
 
@@ -8,28 +8,37 @@ ESTE ARCHIVO ES EL PROGRAMA COMPLETO. No hace falta nada más que Python.
        (Windows y macOS: deja marcada la casilla de tcl/tk. Debian/Ubuntu: sudo apt install python3-tk)
     2. Windows: doble clic en este archivo.   Otros sistemas, en una terminal:
            python3 claude_batch_monitor.py
-    3. La primera vez ofrece instalar la única pieza externa que necesita, la librería oficial
-       `anthropic` (un botón; en la terminal, responde "s"). No instala nada más.
-    4. Pega tu clave de API, escribe tus preguntas y pulsa "Enviar". Si se acaba el saldo o se
-       alcanza un límite, la cola espera y sigue sola; nunca gasta más que el tope que pongas.
+    3. La primera pantalla pregunta cómo quieres usar Claude:
+         - "Con mi plan de Claude" (Pro/Max): necesita Claude Code (el programa oficial de Anthropic)
+           instalado y con tu sesión iniciada. No hay clave ni saldo ni nada que instalar aquí.
+         - "Con una clave de API": ofrece instalar la única pieza externa que necesita, la librería
+           oficial `anthropic` (un botón; en la terminal, responde "s"), y te pide la clave.
+    4. Escribe tus preguntas y pulsa "Enviar". Si se acaba el cupo de tu plan o se alcanza un límite,
+       la cola espera a que se renueve y sigue sola; con una clave, nunca gasta más que el tope que pongas.
 
   Terminal y servidores:   python3 claude_batch_monitor.py --cli --help
 
   In English
     One plain Python file: no packing, no obfuscation, no hidden steps. Install Python 3.9+, then
-    double-click it on Windows or run `python3 claude_batch_monitor.py` elsewhere. On first run it
-    offers to install the one library it needs (`anthropic`). Your questions go to the Claude API
-    with a spending cap you choose; waiting and retrying is automatic.
+    double-click it on Windows or run `python3 claude_batch_monitor.py` elsewhere. The first screen
+    asks how to use Claude: with your Claude plan (Pro/Max, through the Claude Code you already have
+    signed in: no key, no per-question cost) or with an API key (it offers to install the `anthropic`
+    library and asks for the key, with a spending cap you choose). Waiting for a limit to renew and
+    retrying is automatic.
 
   Librerías externas
-    Obligatoria: `anthropic`, la oficial de Anthropic (si falta, el programa se ofrece a instalarla).
+    Para usar una clave de API: `anthropic`, la oficial de Anthropic (si falta, el programa se ofrece a
+    instalarla). Con tu plan de Claude no hace falta: se usa Claude Code, que ya tienes.
     Opcionales, el programa funciona sin ellas: `keyring` (la clave en el llavero del sistema),
     `pystray` y `Pillow` (icono en la bandeja), `plyer` (avisos de escritorio).
     Todo lo demás es la biblioteca estándar de Python.
 
   Qué hace en tu ordenador
-    - Se conecta a api.anthropic.com con tu clave. Nada más, salvo avisos por Telegram si los activas
-      (api.telegram.org) y la descarga de `anthropic` desde PyPI si aceptas instalarla.
+    - Con una clave de API se conecta a api.anthropic.com. Con tu plan de Claude no se conecta a nada
+      por sí mismo: arranca `claude` (Claude Code, sin modificarlo y con tu propia sesión) y es éste
+      quien habla con Anthropic; el programa nunca ve tus credenciales. Nada más, salvo avisos por
+      Telegram si los activas (api.telegram.org) y la descarga de `anthropic` desde PyPI si aceptas
+      instalarla.
     - Guarda su configuración, las respuestas y un registro en su propia carpeta de datos
       (subcarpeta ClaudeMonitor de %APPDATA% en Windows, ~/Library/Application Support en macOS
       y ~/.config en Linux). La clave va al llavero del sistema si hay `keyring`; nunca se
@@ -45,7 +54,9 @@ ESTE ARCHIVO ES EL PROGRAMA COMPLETO. No hace falta nada más que Python.
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
+import copy
 import csv
 import gc
 import html
@@ -61,6 +72,7 @@ import queue
 import random
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -73,15 +85,16 @@ import urllib.request
 import uuid
 import webbrowser
 import zlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Optional, Union
 
 try:
@@ -107,42 +120,45 @@ except ImportError:  # un Python sin tkinter: la terminal funciona y el arranque
 # ============================================================================
 # ÍNDICE   (cada sección empieza con un título numerado: busca su número)
 # ============================================================================
-#    1. Carpetas de datos, registro de eventos y escritura atómica       línea   148
-#    2. Trocear el texto del usuario en órdenes                          línea   280
-#    3. Modelos, precios y coste                                         línea   315
-#    4. Configuración                                                    línea   637
-#    5. Estado guardado y almacén seguro de secretos                     línea   871
-#    6. El lote: órdenes, estado de cada una y guardado en disco         línea   999
-#    7. Leer órdenes desde texto, CSV, TSV y JSONL                       línea  1397
-#    8. Respetar los límites de la API                                   línea  1593
-#    9. Exportar resultados                                              línea  1755
-#   10. Estimar el coste antes de gastar                                 línea  1930
-#   11. Avisos: escritorio y Telegram                                    línea  2036
-#   12. Sistema operativo: anti-suspensión y abrir carpetas              línea  2153
-#   13. Una sola copia del programa gastando a la vez                    línea  2295
-#   14. Motores: clasificar los errores de la API                        línea  2435
-#   15. Motores: lo común (contabilidad, esperas, guardado y parada)     línea  2659
-#   16. Motor inmediato (Messages API)                                   línea  3569
-#   17. Motor de lote (Message Batches API, mitad de precio)             línea  3760
-#   18. Clave de API y elección de modelo                                línea  4273
-#   19. La cola del modo simple                                          línea  4388
-#   20. Ejecutar un lote en segundo plano (modo avanzado)                línea  4687
-#   21. Terminal (--cli)                                                 línea  4835
-#   22. Interfaz: textos en español e inglés                             línea  5306
-#   23. Interfaz: colores, tipografías y estilos                         línea  5697
-#   24. Interfaz: el icono, dibujado con código                          línea  5892
-#   25. Interfaz: ventanas y paneles comunes                             línea  5971
-#   26. Interfaz: puente entre hilos                                     línea  6101
-#   27. Interfaz: icono en la bandeja del sistema (opcional)             línea  6178
-#   28. Interfaz: respuestas con formato                                 línea  6254
-#   29. Interfaz avanzada: ventanas secundarias                          línea  6507
-#   30. Modo simple                                                      línea  6723
-#   31. Modo avanzado                                                    línea  7783
-#   32. Abrir la interfaz                                                línea  9270
-#   33. Instalar la librería de Anthropic si falta                       línea  9364
-#   34. Arranque                                                         línea  9686
+#    1. Carpetas de datos, registro de eventos y escritura atómica       línea   164
+#    2. Trocear el texto del usuario en órdenes                          línea   296
+#    3. Franja horaria: trabajar solo entre dos horas                    línea   331
+#    4. Modelos, precios y coste                                         línea   400
+#    5. Configuración                                                    línea   722
+#    6. Estado guardado y almacén seguro de secretos                     línea   991
+#    7. El lote: órdenes, estado de cada una y guardado en disco         línea  1123
+#    8. Leer órdenes desde texto, CSV, TSV y JSONL                       línea  1523
+#    9. Respetar los límites de la API                                   línea  1719
+#   10. Exportar resultados                                              línea  1881
+#   11. Estimar el coste antes de gastar                                 línea  2056
+#   12. Avisos: escritorio y Telegram                                    línea  2176
+#   13. Sistema operativo: anti-suspensión y abrir carpetas              línea  2324
+#   14. Una sola copia del programa gastando a la vez                    línea  2466
+#   15. Motores: clasificar los errores de la API                        línea  2606
+#   16. Motores: lo común (contabilidad, esperas, guardado y parada)     línea  2830
+#   17. Motor inmediato (Messages API)                                   línea  3800
+#   18. Motor de lote (Message Batches API, mitad de precio)             línea  3991
+#   19. Plan de Claude: hablar con Claude Code (claude -p)               línea  4506
+#   20. Motor del plan de Claude (tu suscripción, sin pagar por token)   línea  5370
+#   21. Clave de API y elección de modelo                                línea  5830
+#   22. Ejecutar un lote en segundo plano (modo avanzado) y elegir el motor línea  5947
+#   23. La cola del modo simple                                          línea  6099
+#   24. Terminal (--cli)                                                 línea  6411
+#   25. Interfaz: textos en español e inglés                             línea  6908
+#   26. Interfaz: colores, tipografías y estilos                         línea  7299
+#   27. Interfaz: el icono, dibujado con código                          línea  7494
+#   28. Interfaz: ventanas y paneles comunes                             línea  7573
+#   29. Interfaz: puente entre hilos                                     línea  7703
+#   30. Interfaz: icono en la bandeja del sistema (opcional)             línea  7780
+#   31. Interfaz: respuestas con formato                                 línea  7856
+#   32. Interfaz avanzada: ventanas secundarias                          línea  8109
+#   33. Modo simple                                                      línea  8325
+#   34. Modo avanzado                                                    línea  9385
+#   35. Abrir la interfaz                                                línea 10872
+#   36. Instalar la librería de Anthropic si falta                       línea 10966
+#   37. Arranque                                                         línea 11321
 # ============================================================================
-# Para leerlo en el orden en que se ejecuta: 34 (arranque), 30 (modo simple), 16 (motor inmediato).
+# Para leerlo en el orden en que se ejecuta: 37 (arranque), 33 (modo simple), 17 (motor inmediato).
 
 # ============================================================================
 # 1. Carpetas de datos, registro de eventos y escritura atómica
@@ -312,7 +328,76 @@ def split_messages(text: str, separator: str = DEFAULT_SEPARATOR) -> list[str]:
 
 
 # ============================================================================
-# 3. Modelos, precios y coste
+# 3. Franja horaria: trabajar solo entre dos horas
+#    (claude_batch_monitor/franja.py)
+# ============================================================================
+#
+# Franja horaria: trabajar solo entre dos horas del día (por ejemplo, de noche).
+#
+# Se escribe `HH:MM-HH:MM`. Si la hora de inicio es mayor que la de fin, la franja cruza la medianoche:
+# `22:00-07:00` es «desde las diez de la noche hasta las siete de la mañana».
+
+
+Franja = tuple[dt_time, dt_time]
+
+_FORMATO = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*(?:-|–|—|a)\s*(\d{1,2}):(\d{2})\s*$")
+
+
+def leer_franja(texto: str) -> Optional[Franja]:
+    """`22:00-07:00` -> (22:00, 07:00). Un texto vacío es «sin franja» (None). Si no se entiende, `ValueError`."""
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+    m = _FORMATO.match(texto)
+    if not m:
+        raise ValueError(f"La franja horaria debe escribirse HH:MM-HH:MM (por ejemplo 22:00-07:00), no «{texto}».")
+    h1, m1, h2, m2 = (int(g) for g in m.groups())
+    if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
+        raise ValueError(f"La franja horaria «{texto}» tiene una hora que no existe.")
+    inicio, fin = dt_time(h1, m1), dt_time(h2, m2)
+    if inicio == fin:
+        raise ValueError("La franja horaria empieza y termina a la misma hora: escribe dos horas distintas.")
+    return inicio, fin
+
+
+def franja_valida(texto: str) -> bool:
+    try:
+        leer_franja(texto)
+    except ValueError:
+        return False
+    return True
+
+
+def texto_de_franja(franja: Franja) -> str:
+    return f"{franja[0]:%H:%M}-{franja[1]:%H:%M}"
+
+
+def en_franja(franja: Franja, ahora: datetime) -> bool:
+    """¿Estamos dentro de la franja? El inicio cuenta; el fin, no."""
+    inicio, fin = franja
+    t = ahora.time().replace(second=0, microsecond=0)
+    if inicio < fin:
+        return inicio <= t < fin
+    return t >= inicio or t < fin  # cruza la medianoche
+
+
+def proximo_inicio(franja: Franja, ahora: datetime) -> datetime:
+    """La próxima vez que empieza la franja (hoy si aún no ha empezado, si no mañana)."""
+    candidato = datetime.combine(ahora.date(), franja[0], tzinfo=ahora.tzinfo)
+    if candidato <= ahora:
+        candidato += timedelta(days=1)
+    return candidato
+
+
+def segundos_hasta_inicio(franja: Franja, ahora: datetime) -> float:
+    """0 si ya estamos dentro; si no, los segundos que faltan para que empiece."""
+    if en_franja(franja, ahora):
+        return 0.0
+    return (proximo_inicio(franja, ahora) - ahora).total_seconds()
+
+
+# ============================================================================
+# 4. Modelos, precios y coste
 #    (claude_batch_monitor/pricing.py)
 # ============================================================================
 #
@@ -634,7 +719,7 @@ def descripcion_modelo(modelo: str) -> str:
 
 
 # ============================================================================
-# 4. Configuración
+# 5. Configuración
 #    (claude_batch_monitor/config.py)
 # ============================================================================
 #
@@ -645,7 +730,9 @@ def descripcion_modelo(modelo: str) -> str:
 # cifra que decide si se para el lote.
 
 
-MODOS = ("inmediato", "lote")
+MODOS = ("inmediato", "lote", "plan")  # plan = con tu plan de Claude (Pro/Max), a través de Claude Code
+MODELO_DEL_PLAN = "plan de Claude"  # cómo se llama el modelo de un lote del plan si no se eligió ninguno
+MODELO_PLAN_VALIDO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-\[\]]{0,79}$")  # un alias (sonnet) o un id; nada raro
 INTERFACES = ("simple", "avanzada")
 TEMAS = ("auto", "claro", "oscuro")  # auto = el del sistema
 MAX_TOKENS_STREAMING = 16_000  # por encima, el SDK exige streaming
@@ -688,7 +775,9 @@ class Configuracion:
     plantilla: str = ""  # envuelve cada orden; `{input}` marca el hueco (ver inputs.aplicar_plantilla)
     modelo: str = DEFAULT_MODEL
     separador: str = DEFAULT_SEPARATOR
-    modo: str = "inmediato"  # inmediato | lote (Batches API, -50 %)
+    modo: str = "inmediato"  # inmediato | lote (Batches API, -50 %) | plan (tu plan de Claude, sin pagar por token)
+    modelo_plan: str = ""    # con el plan: un alias (sonnet, opus, haiku) o un id; "" = el que traiga tu plan por defecto
+    ruta_claude: str = ""    # con el plan: dónde está el programa `claude`, si no se encuentra solo
     system_prompt: str = ""
     usar_cache: bool = True
     esfuerzo: str = ""  # "" = no enviarlo; low | medium | high | xhigh | max
@@ -707,6 +796,7 @@ class Configuracion:
     # --- Tiempos ---
     modo_continuo: bool = False  # repetir el lote en bucle (¡gasta!)
     hora_limite: str = ""        # "" = sin hora límite (en bucle se aplica 23:59)
+    franja: str = ""             # "" = a cualquier hora; "22:00-07:00" = solo entre esas horas (cruza la medianoche)
     pausa_ciclos_sec: int = DELAY_BETWEEN_CYCLES_SEC
     pausa_entre_mensajes_sec: int = 0
     timeout_api_sec: int = DEFAULT_API_TIMEOUT_SEC
@@ -732,15 +822,32 @@ class Configuracion:
     def es_lote(self) -> bool:
         return self.modo == "lote"
 
+    @property
+    def es_plan(self) -> bool:
+        return self.modo == "plan"
+
+    @property
+    def nombre_de_modelo(self) -> str:
+        """El modelo tal como se le cuenta a la persona (con el plan, el del plan si no eligió otro)."""
+        if self.es_plan:
+            return self.modelo_plan or MODELO_DEL_PLAN
+        return self.modelo
+
     def precios(self) -> Precios:
         return resolver_precios(self.modelo, self.precio_input_mtok, self.precio_output_mtok)
 
     def validar(self) -> Validacion:
         v = Validacion()
-        if not self.modelo.strip():
-            v.errores.append("Falta el modelo.")
         if self.modo not in MODOS:
             v.errores.append(f"Modo desconocido '{self.modo}'. Usa: {', '.join(MODOS)}.")
+        try:
+            leer_franja(self.franja)
+        except ValueError as error:
+            v.errores.append(str(error))
+        if self.es_plan:
+            return self._validar_plan(v)
+        if not self.modelo.strip():
+            v.errores.append("Falta el modelo.")
         if self.max_tokens < 1:
             v.errores.append("max_tokens debe ser al menos 1.")
         if self.tope_gasto_usd < 0:
@@ -776,6 +883,16 @@ class Configuracion:
             v.avisos.append("La concurrencia no aplica al modo lote (la API ya lo procesa en paralelo).")
         return v
 
+    def _validar_plan(self, v: Validacion) -> Validacion:
+        """Con el plan no se paga por token: no hay precios, ni tope de gasto, ni max_tokens que revisar."""
+        if self.modelo_plan and not MODELO_PLAN_VALIDO.match(self.modelo_plan):
+            v.errores.append(f"El modelo «{self.modelo_plan}» no parece un alias ni un id de modelo.")
+        if self.modo_continuo:
+            v.errores.append("El modo bucle no existe con el plan de Claude: repetiría el lote hasta agotar tu cupo.")
+        if self.concurrencia > 1:
+            v.avisos.append("Con el plan de Claude las órdenes se envían de una en una.")
+        return v
+
     # ------------------------------------------------------------------
 
     def a_dict(self) -> dict:
@@ -809,6 +926,8 @@ class Configuracion:
             modelo=texto("modelo", base.modelo).strip() or base.modelo,
             separador=texto("separador", base.separador).strip() or base.separador,
             modo=modo if modo in MODOS else base.modo,
+            modelo_plan=texto("modelo_plan", "").strip(),
+            ruta_claude=texto("ruta_claude", "").strip(),
             system_prompt=texto("system_prompt", ""),
             usar_cache=bool(data.get("usar_cache", base.usar_cache)),
             esfuerzo=esfuerzo if esfuerzo in NIVELES_ESFUERZO else "",
@@ -822,6 +941,7 @@ class Configuracion:
             estimar_antes_de_enviar=bool(data.get("estimar_antes_de_enviar", True)),
             modo_continuo=bool(data.get("modo_continuo", False)),
             hora_limite=texto("hora_limite", "").strip(),
+            franja=texto("franja", "").strip(),
             pausa_ciclos_sec=_int(data.get("pausa_ciclos_sec"), DELAY_BETWEEN_CYCLES_SEC, 1, 3600),
             pausa_entre_mensajes_sec=_int(data.get("pausa_entre_mensajes_sec"), 0, 0, 60),
             timeout_api_sec=_int(data.get("timeout_api_sec"), DEFAULT_API_TIMEOUT_SEC, 15, 900),
@@ -868,7 +988,7 @@ class ConfigManager:
 
 
 # ============================================================================
-# 5. Estado guardado y almacén seguro de secretos
+# 6. Estado guardado y almacén seguro de secretos
 #    (claude_batch_monitor/state.py)
 # ============================================================================
 #
@@ -897,6 +1017,8 @@ class EstadoMonitor:
     gasto_acumulado_usd: Decimal = Decimal(0)
     tokens_input_total: int = 0
     tokens_output_total: int = 0
+    # Plan de Claude: hasta cuándo no se puede enviar (un límite alcanzado), en ISO UTC. Sobrevive a cerrar el programa.
+    plan_bloqueado_hasta: str = ""
 
     def guardar(self, path: Optional[Path] = None) -> bool:
         """Escribe el estado. False si no se pudo (disco lleno, sin permisos…): quien gasta debe enterarse."""
@@ -908,6 +1030,7 @@ class EstadoMonitor:
             "gasto_acumulado_usd": str(self.gasto_acumulado_usd),
             "tokens_input_total": self.tokens_input_total,
             "tokens_output_total": self.tokens_output_total,
+            "plan_bloqueado_hasta": self.plan_bloqueado_hasta,
         }
         try:
             write_atomic(path, json.dumps(datos, indent=2, ensure_ascii=False))
@@ -934,6 +1057,7 @@ class EstadoMonitor:
                 gasto_acumulado_usd=max(Decimal(0), a_decimal(data.get("gasto_acumulado_usd"), Decimal(0))),
                 tokens_input_total=max(0, int(data.get("tokens_input_total", 0))),
                 tokens_output_total=max(0, int(data.get("tokens_output_total", 0))),
+                plan_bloqueado_hasta=str(data.get("plan_bloqueado_hasta") or ""),
             )
         except Exception:
             logger.exception("state.json ilegible; se aparta como .corrupt.json")
@@ -996,7 +1120,7 @@ def origen_api_key() -> str:
 
 
 # ============================================================================
-# 6. El lote: órdenes, estado de cada una y guardado en disco
+# 7. El lote: órdenes, estado de cada una y guardado en disco
 #    (claude_batch_monitor/job.py)
 # ============================================================================
 #
@@ -1121,7 +1245,7 @@ class Job:
         return cls(
             uuid.uuid4().hex[:8],
             datetime.now().isoformat(),
-            config.modelo,
+            config.nombre_de_modelo,  # con el plan, el alias elegido o «plan de Claude»
             mensajes,
             separador=config.separador,
             modo=config.modo,
@@ -1293,15 +1417,17 @@ class Job:
         ser un accidente. Se avisa; la decisión es del usuario.
         """
         avisos: list[str] = []
-        if normalizar_id(config.modelo) != normalizar_id(self.modelo):
+        if normalizar_id(config.nombre_de_modelo) != normalizar_id(self.modelo):
             avisos.append(
                 f"El lote se creó con el modelo {self.modelo} y ahora está seleccionado "
-                f"{config.modelo}: las órdenes pendientes se responderán con otro modelo."
+                f"{config.nombre_de_modelo}: las órdenes pendientes se responderán con otro modelo."
             )
         if config.modo != self.modo:
             extra = ""
             if self.modo == "lote" and config.modo == "inmediato":
                 extra = " Se reenviaría por la API normal, al doble de precio."
+            elif self.modo == "plan":
+                extra = " Se reenviaría por la API, que se paga por token, en vez de gastar el cupo de tu plan."
             avisos.append(
                 f"El lote se creó en modo '{self.modo}' y ahora está en modo '{config.modo}'.{extra}"
             )
@@ -1394,7 +1520,7 @@ def purgar_jobs_antiguos(
 
 
 # ============================================================================
-# 7. Leer órdenes desde texto, CSV, TSV y JSONL
+# 8. Leer órdenes desde texto, CSV, TSV y JSONL
 #    (claude_batch_monitor/inputs.py)
 # ============================================================================
 #
@@ -1590,7 +1716,7 @@ def leer_ordenes(
 
 
 # ============================================================================
-# 8. Respetar los límites de la API
+# 9. Respetar los límites de la API
 #    (claude_batch_monitor/ratelimit.py)
 # ============================================================================
 #
@@ -1752,7 +1878,7 @@ def observar_seguro(tracker: Optional[RateLimitTracker], objeto: object) -> None
 
 
 # ============================================================================
-# 9. Exportar resultados
+# 10. Exportar resultados
 #    (claude_batch_monitor/export.py)
 # ============================================================================
 #
@@ -1927,7 +2053,7 @@ def _txt(job: Job, destino: Path, ciclo: int) -> None:
 
 
 # ============================================================================
-# 10. Estimar el coste antes de gastar
+# 11. Estimar el coste antes de gastar
 #    (claude_batch_monitor/estimator.py)
 # ============================================================================
 #
@@ -1954,9 +2080,17 @@ class Estimacion:
     modo: str
     max_tokens: int
     avisos: list = field(default_factory=list)
+    plan: bool = False  # con el plan de Claude no se paga por token: no hay precios ni coste máximo
 
     def resumen_lineas(self) -> list[str]:
         origen = "contados por la API" if self.exacta else "estimación local"
+        if self.plan:
+            return [
+                f"Órdenes detectadas : {self.ordenes}",
+                f"Modo               : {self.modo}",
+                f"Tokens entrada     : ~{self.tokens_entrada:,} ({origen})",
+                "Coste              : incluido en tu plan (gasta el cupo de tu plan, no dinero por token)",
+            ]
         return [
             f"Órdenes detectadas : {self.ordenes}",
             f"Modo               : {self.modo}",
@@ -1992,6 +2126,12 @@ def estimar(
 ) -> Estimacion:
     """Peor caso de coste para estas órdenes con esta configuración."""
     precios = config.precios()
+    if config.es_plan:
+        tokens = [estimar_tokens(o) + estimar_tokens(config.system_prompt) for o in ordenes]
+        return Estimacion(
+            ordenes=len(ordenes), tokens_entrada=sum(tokens), exacta=False, coste_maximo=Decimal(0),
+            coste_solo_entrada=Decimal(0), precios=precios, modo="plan de Claude", max_tokens=0, plan=True,
+        )
     lote = config.es_lote
     exactos = client is not None and len(ordenes) <= MAX_ORDENES_CONTEO_EXACTO
 
@@ -2033,7 +2173,7 @@ def estimar(
 
 
 # ============================================================================
-# 11. Avisos: escritorio y Telegram
+# 12. Avisos: escritorio y Telegram
 #    (claude_batch_monitor/notify.py)
 # ============================================================================
 #
@@ -2141,16 +2281,47 @@ def notificar_escritorio(titulo: str, mensaje: str) -> bool:
         return False
 
 
+# Los avisos que han salido y todavía no han terminado, para dejarlos acabar al cerrar el programa.
+_AVISOS_EN_CURSO: list[threading.Thread] = []
+_CERROJO_DE_AVISOS = threading.Lock()
+ESPERA_AL_SALIR_SEC = 4.0
+
+
+def esperar_avisos_pendientes(limite: float = ESPERA_AL_SALIR_SEC) -> None:
+    """Deja acabar los avisos que acaban de salir antes de que Python se apague (como mucho `limite` segundos).
+
+    Cada aviso corre en un hilo aparte que, antes de enviar nada, consulta el llavero del sistema (código nativo). Si el
+    intérprete empieza a cerrarse justo cuando ese hilo está dentro de ese código, el proceso entero aborta con
+    «FATAL: exception not rethrown» (señal SIGABRT) y se pierde el código de salida con el que iba a terminar: pasaba
+    en 5 de cada 200 cierres hechos a los pocos milisegundos de un aviso, con el equipo ocupado. Se llama sola al salir.
+    """
+    fin = time.monotonic() + limite
+    with _CERROJO_DE_AVISOS:
+        pendientes = list(_AVISOS_EN_CURSO)
+    for hilo in pendientes:
+        resto = fin - time.monotonic()
+        if resto <= 0:
+            break
+        hilo.join(timeout=resto)
+
+
+atexit.register(esperar_avisos_pendientes)
+
+
 def notificar(titulo: str, mensaje: str, chat_id_config: str = "") -> None:
     """Escritorio + Telegram (este en un hilo aparte para no frenar el lote)."""
     notificar_escritorio(titulo, mensaje)
-    threading.Thread(
-        target=enviar_telegram, args=(titulo, mensaje, chat_id_config), daemon=True
-    ).start()
+    hilo = threading.Thread(
+        target=enviar_telegram, args=(titulo, mensaje, chat_id_config), daemon=True, name="aviso"
+    )
+    hilo.start()
+    with _CERROJO_DE_AVISOS:
+        _AVISOS_EN_CURSO[:] = [h for h in _AVISOS_EN_CURSO if h.is_alive()]
+        _AVISOS_EN_CURSO.append(hilo)
 
 
 # ============================================================================
-# 12. Sistema operativo: anti-suspensión y abrir carpetas
+# 13. Sistema operativo: anti-suspensión y abrir carpetas
 #    (claude_batch_monitor/platform_utils.py)
 # ============================================================================
 #
@@ -2292,7 +2463,7 @@ def tema_del_sistema() -> str:
 
 
 # ============================================================================
-# 13. Una sola copia del programa gastando a la vez
+# 14. Una sola copia del programa gastando a la vez
 #    (claude_batch_monitor/instancia_unica.py)
 # ============================================================================
 #
@@ -2432,7 +2603,7 @@ def aviso_de_otra_copia(dueno: str = "") -> str:
 
 
 # ============================================================================
-# 14. Motores: clasificar los errores de la API
+# 15. Motores: clasificar los errores de la API
 #    (claude_batch_monitor/core/errors.py)
 # ============================================================================
 #
@@ -2656,7 +2827,7 @@ def es_respuesta_ilegible(error: BaseException) -> bool:
 
 
 # ============================================================================
-# 15. Motores: lo común (contabilidad, esperas, guardado y parada)
+# 16. Motores: lo común (contabilidad, esperas, guardado y parada)
 #    (claude_batch_monitor/core/base.py)
 # ============================================================================
 #
@@ -2689,6 +2860,8 @@ MAX_SIN_CONEXION_SEC = 600
 MAX_ESPERA_API_SEC = 24 * 3600
 # Veces que una misma orden puede agotar el tiempo DESPUÉS de enviarse: cada una pudo cobrarse.
 MAX_TIMEOUTS_POR_ORDEN = 3
+# Una espera hasta una hora del reloj se parte en trozos de esto: en cada uno se vuelve a mirar el reloj.
+TROZO_DE_ESPERA_SEC = 60.0
 RESPUESTA_VACIA = "(Claude devolvió una respuesta vacía.)"
 AVISO_TRUNCADA = "[ADVERTENCIA: respuesta truncada por el límite de tokens]"
 
@@ -2700,6 +2873,7 @@ class StopReason(str, Enum):
     BUDGET = "budget"              # tope de gasto propio
     NO_CREDIT = "no_credit"        # sin saldo (402)
     ACCOUNT_LIMIT = "account_limit"  # tope mensual del tier o límite fijado en la consola
+    EXTRA_USAGE = "extra_usage"    # plan de Claude: se agotó y Claude Code empezó a usar créditos extra (de pago)
     NETWORK = "network"
     FATAL = "fatal"
 
@@ -2712,6 +2886,8 @@ FRASES_DE_PARADA = {
     StopReason.BUDGET: "Detenido por el tope de gasto. Lo pagado está guardado.",
     StopReason.NO_CREDIT: "Detenido: sin saldo en la cuenta de Anthropic.",
     StopReason.ACCOUNT_LIMIT: "Detenido: límite de gasto de la cuenta de Anthropic.",
+    StopReason.EXTRA_USAGE: "Detenido: tu plan se agotó y Claude Code empezó a usar créditos extra. "
+                            "El lote queda guardado y se puede reanudar cuando el plan se renueve.",
     StopReason.NETWORK: "Detenido por un fallo de red. El lote se puede reanudar.",
     StopReason.FATAL: "Detenido por un error. Revisa el mensaje y reanuda el lote.",
 }
@@ -2753,6 +2929,7 @@ class Callbacks:
     espera: Optional[Callable[[str, float], None]] = None     # motivo, segundos
     inicio_orden: Optional[Callable[[JobMessage], None]] = None
     delta: Optional[Callable[[int, str], None]] = None        # id de orden, texto nuevo (streaming)
+    plan: Optional[Callable[[Any], None]] = None              # plan de Claude: lo último que se sabe de su cupo (EstadoPlan)
 
     def emit(self, nombre: str, *args: Any) -> None:
         fn = getattr(self, nombre, None)
@@ -2950,13 +3127,19 @@ class EngineBase:
         techo = min(30 * (2 ** min(max(intentos - 1, 0), 6)), MAX_BACKOFF_SECONDS)
         return max(1.0, random.uniform(0, techo))
 
-    def esperar(self, segundos: float, cb: Callbacks) -> bool:
-        """Espera cancelable. False si se interrumpió (parada o hora límite)."""
+    def esperar(self, segundos: float, cb: Callbacks, atras: float = 0.0) -> bool:
+        """Espera cancelable. False si se interrumpió (parada o hora límite).
+
+        `atras` son los segundos que aún quedarán esperando DESPUÉS de este trozo (una espera larga se parte en trozos,
+        ver `_esperar_hasta`): solo sirve para que la cuenta atrás que se enseña sea la de la espera entera.
+        """
         if not math.isfinite(segundos):
             segundos = 60.0  # un valor que no es un tiempo no puede dejar el programa esperando para siempre
         segundos = max(0.0, segundos)
+        atras = max(0.0, atras) if math.isfinite(atras) else 0.0
+        total = segundos + atras
         fin = time.monotonic() + segundos
-        cb.emit("tick", segundos, segundos)
+        cb.emit("tick", total, total)
         while True:
             restante = fin - time.monotonic()
             if restante <= 0:
@@ -2965,7 +3148,55 @@ class EngineBase:
                 return False
             if self.evento_detener.wait(min(0.5, restante)):
                 return False
-            cb.emit("tick", segundos, max(0.0, fin - time.monotonic()))
+            cb.emit("tick", total, max(0.0, fin - time.monotonic()) + atras)
+
+    def _esperar_hasta(self, instante: datetime, cb: Callbacks) -> bool:
+        """Espera hasta una hora del reloj (no «X segundos»): si el equipo se suspende en medio, al despertar sigue bien.
+
+        Un `monotonic` no cuenta el tiempo de suspensión en todos los sistemas, y una espera de horas por el
+        reinicio de un límite se pasaría. Por eso se parte en trozos y en cada uno se mira el reloj de pared.
+        """
+        def ahora() -> datetime:
+            return datetime.now(instante.tzinfo)
+
+        while True:
+            restante = (instante - ahora()).total_seconds()
+            if restante <= 0:
+                return True
+            trozo = min(restante, TROZO_DE_ESPERA_SEC)
+            if not self.esperar(trozo, cb, atras=restante - trozo):
+                return False
+
+    # ------------------------------------------------------------------
+    # Franja horaria
+    # ------------------------------------------------------------------
+
+    def _franja(self) -> Optional[Franja]:
+        try:
+            return leer_franja(self.config.franja)
+        except ValueError:
+            return None  # la validación ya lo avisó antes de empezar
+
+    def _esperar_franja(self, cb: Callbacks) -> bool:
+        """Si hay franja horaria y ahora estamos fuera, espera a que empiece. False si se interrumpió."""
+        franja = self._franja()
+        if franja is None:
+            return True
+        while not self._debe_parar():
+            ahora = datetime.now()
+            espera = segundos_hasta_inicio(franja, ahora)
+            if espera <= 0:
+                return True
+            inicio = ahora + timedelta(seconds=espera)
+            cb.emit("espera", "franja", espera)
+            cb.emit(
+                "estado",
+                f"Fuera de la franja horaria ({texto_de_franja(franja)}). Sigo a las {inicio:%H:%M}.",
+                False,
+            )
+            if not self._esperar_hasta(inicio, cb):
+                return False
+        return False
 
     # ------------------------------------------------------------------
     # Parada
@@ -3566,7 +3797,7 @@ class EngineBase:
 
 
 # ============================================================================
-# 16. Motor inmediato (Messages API)
+# 17. Motor inmediato (Messages API)
 #    (claude_batch_monitor/core/sequential.py)
 # ============================================================================
 #
@@ -3672,7 +3903,7 @@ class SequentialEngine(EngineBase):
         total = self.job.total_count()
         cont = Contadores()
         while True:
-            if self._debe_parar() or not self._throttle_preventivo(cb):
+            if self._debe_parar() or not self._esperar_franja(cb) or not self._throttle_preventivo(cb):
                 return False
             coste_max = self.estimar_coste_maximo(msg)
             if not self._reservar(coste_max, cb):
@@ -3757,7 +3988,7 @@ class SequentialEngine(EngineBase):
 
 
 # ============================================================================
-# 17. Motor de lote (Message Batches API, mitad de precio)
+# 18. Motor de lote (Message Batches API, mitad de precio)
 #    (claude_batch_monitor/core/batch.py)
 # ============================================================================
 #
@@ -3925,6 +4156,8 @@ class BatchEngine(EngineBase):
             return
 
         if not self._cabe_en_el_tope(pendientes, cb):
+            return
+        if not self._esperar_franja(cb):  # (recoger resultados no es enviar: solo el envío espera a la franja)
             return
 
         peticiones = [
@@ -4270,7 +4503,1331 @@ class BatchEngine(EngineBase):
 
 
 # ============================================================================
-# 18. Clave de API y elección de modelo
+# 19. Plan de Claude: hablar con Claude Code (claude -p)
+#    (claude_batch_monitor/core/claude_code.py)
+# ============================================================================
+#
+# Hablar con Claude Code (`claude -p`): localizarlo, comprobar la sesión, lanzarlo y entender lo que imprime.
+#
+# Es la mitad «de fuera» del modo plan (la otra mitad es `plan.py`). Este programa NO toca tus credenciales ni la
+# API: lanza el programa oficial `claude`, que ya está conectado a tu cuenta, le pasa la pregunta y lee su salida
+# (`--output-format stream-json`, documentada por Anthropic). Todo lo que sabe de un límite del plan lo lee de ahí.
+#
+# Lo que se vigila, porque es lo que haría pagar de más:
+# - Si el entorno trae una clave de API (`ANTHROPIC_API_KEY`…), `claude -p` la usa SIEMPRE en vez de tu plan: se quita
+#   del entorno del hijo, y además se comprueba que Claude Code diga que no usa clave (`apiKeySource`).
+# - Si el plan se agota y tienes activado el «uso extra» de claude.ai, Claude Code seguiría con créditos de pago:
+#   el evento `rate_limit_event` lo cuenta (`isUsingOverage`) y el motor se para en cuanto lo ve.
+
+
+# Para probar con un `claude` falso (o forzar uno concreto). Si está puesta, es la única que se mira.
+VARIABLE_RUTA = "CLAUDE_MONITOR_CLAUDE"
+VERSION_MINIMA = (2, 0, 0)
+SEGUNDOS_DE_CACHE = 90.0
+MAX_BYTES_STDERR = 8000
+MAX_LINEAS_AJENAS = 20
+# Si el reinicio del límite que dice Claude Code es absurdo (más lejos que esto, o ya muy pasado), no se le cree.
+MAX_DIAS_HASTA_EL_REINICIO = 40
+MARGEN_TRAS_EL_REINICIO_SEC = 90.0
+
+# Variables del entorno que harían que Claude Code NO use tu plan sino una clave o un proveedor de pago por uso.
+VARIABLES_DE_PAGO_POR_USO = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
+# `claude auth status` dice cómo está iniciada la sesión: estos son un plan; el resto, no.
+METODOS_DE_PLAN = ("claude.ai", "oauth_token")
+METODOS_DE_PAGO_POR_USO = ("api_key", "api_key_helper", "third_party")
+# `apiKeySource` del evento de inicio: así de «ninguna clave» se ve cuando se usa el plan.
+ORIGENES_SIN_CLAVE = ("", "none", "oauth")
+
+SISTEMA_BASE = (
+    "You are Claude, an AI assistant made by Anthropic. The user is typing questions into a simple question-queue "
+    "app and reading the answers there. Answer each question helpfully and completely, in the language of the "
+    "question, using Markdown when it helps. You have no tools in this chat: you cannot read files, browse or run "
+    "commands, so answer from what you know and from what the question itself contains."
+)
+
+
+# ----------------------------------------------------------------------
+# Dónde está Claude Code y cómo se lanza
+# ----------------------------------------------------------------------
+
+
+def _rutas_habituales() -> list[str]:
+    casa = Path.home()
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or str(casa / "AppData" / "Local")
+        datos = os.environ.get("APPDATA") or str(casa / "AppData" / "Roaming")
+        return [
+            str(casa / ".local" / "bin" / "claude.exe"),
+            str(Path(local) / "Programs" / "claude" / "claude.exe"),
+            str(casa / ".claude" / "local" / "claude.exe"),
+            str(Path(datos) / "npm" / "claude.cmd"),
+        ]
+    return [
+        str(casa / ".local" / "bin" / "claude"),
+        str(casa / ".claude" / "local" / "claude"),
+        "/usr/local/bin/claude",
+        "/opt/homebrew/bin/claude",
+        str(casa / ".npm-global" / "bin" / "claude"),
+        str(casa / ".bun" / "bin" / "claude"),
+        str(casa / ".volta" / "bin" / "claude"),
+    ]
+
+
+def _es_ejecutable(ruta: str) -> bool:
+    try:
+        return os.path.isfile(ruta) and os.access(ruta, os.X_OK)
+    except (OSError, ValueError):
+        return False
+
+
+def buscar_claude(ruta_configurada: str = "") -> Optional[str]:
+    """Dónde está el programa `claude`, o None si no se encuentra.
+
+    Un programa abierto con doble clic suele no heredar el PATH de la terminal, por eso se miran también los
+    sitios donde el instalador oficial lo deja.
+    """
+    forzada = (os.environ.get(VARIABLE_RUTA) or "").strip()
+    if forzada:
+        return forzada if _es_ejecutable(forzada) else None
+    candidatos = [(ruta_configurada or "").strip(), shutil.which("claude") or "", *_rutas_habituales()]
+    for candidato in candidatos:
+        if candidato and _es_ejecutable(candidato):
+            return candidato
+    return None
+
+
+def entorno_para_el_plan(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """El entorno con el que se lanza `claude`: el del programa, sin nada que lo desvíe del pago por uso."""
+    entorno = dict(os.environ if base is None else base)
+    for nombre in VARIABLES_DE_PAGO_POR_USO:
+        entorno.pop(nombre, None)
+    return entorno
+
+
+def carpeta_de_trabajo() -> Path:
+    """Una carpeta vacía y propia donde se lanza `claude`: así no carga ningún `CLAUDE.md` ni proyecto ajeno."""
+    carpeta = DATA_DIR / "plan"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    return carpeta
+
+
+def _opciones_de_proceso() -> dict[str, Any]:
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}  # type: ignore[attr-defined]
+    return {"start_new_session": True}  # su propio grupo: se le puede matar con todo lo que lance
+
+
+# ----------------------------------------------------------------------
+# ¿Está listo? (instalado, con la sesión iniciada y usando un plan)
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EstadoClaude:
+    estado: str  # ok | no_instalado | antiguo | sin_sesion | no_es_plan | error
+    ruta: str = ""
+    version: str = ""
+    metodo: str = ""   # cómo está iniciada la sesión (`authMethod`)
+    detalle: str = ""
+
+    @property
+    def listo(self) -> bool:
+        return self.estado == "ok"
+
+    def explicacion(self) -> str:
+        """Qué le pasa a Claude Code y qué hacer, en cristiano."""
+        return {
+            "ok": "Claude Code está listo y usa tu plan.",
+            "no_instalado": (
+                "No encuentro Claude Code en este ordenador. Es el programa oficial de Anthropic con el que se usa tu "
+                "plan de Claude (Pro o Max). Instálalo desde https://code.claude.com/docs/en/setup, ábrelo una vez e "
+                "inicia sesión con tu cuenta."
+            ),
+            "antiguo": (
+                f"Tu Claude Code ({self.version}) es demasiado antiguo para este programa. "
+                "Actualízalo con:  claude update"
+            ),
+            "sin_sesion": (
+                "Claude Code está instalado pero no has iniciado sesión. En una terminal ejecuta:  claude auth login  "
+                "(e inicia sesión con tu cuenta de Claude)."
+            ),
+            "no_es_plan": (
+                f"Claude Code está iniciado con {self.metodo or 'una clave'}, que se paga por uso, no con tu plan. "
+                "Para usar tu plan, en una terminal ejecuta:  claude auth logout  y luego  claude auth login  "
+                "(elige tu cuenta de Claude, no «Anthropic Console»)."
+            ),
+        }.get(self.estado, f"No pude comprobar Claude Code: {self.detalle or 'error desconocido'}")
+
+
+_cache: dict[str, tuple[float, EstadoClaude]] = {}
+
+
+def _ejecutar_corto(
+    orden: list[str], timeout: float, ejecutar: Callable[..., Any] = subprocess.run
+) -> tuple[Optional[int], str, str]:
+    """Lanza una orden breve de Claude Code y devuelve (código, stdout, stderr)."""
+    try:
+        r = ejecutar(
+            orden, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, cwd=str(carpeta_de_trabajo()),
+            env=entorno_para_el_plan(), **({"creationflags": subprocess.CREATE_NO_WINDOW}  # type: ignore[attr-defined]
+                                           if sys.platform == "win32" else {}),
+        )
+    except subprocess.TimeoutExpired:
+        return None, "", "no respondió a tiempo"
+    except OSError as error:
+        return None, "", str(error)
+    return r.returncode, (r.stdout or b"").decode("utf-8", "replace"), (r.stderr or b"").decode("utf-8", "replace")
+
+
+def _version(texto: str) -> tuple[int, ...]:
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", texto or "")
+    return tuple(int(g) for g in m.groups()) if m else ()
+
+
+def comprobar_claude(
+    ruta_configurada: str = "", ejecutar: Callable[..., Any] = subprocess.run, usar_cache: bool = True
+) -> EstadoClaude:
+    """¿Se puede usar el plan a través de Claude Code? No gasta nada: solo pregunta versión y estado de la sesión."""
+    ruta = buscar_claude(ruta_configurada)
+    if ruta is None:
+        return EstadoClaude("no_instalado")
+    ahora = time.monotonic()
+    guardado = _cache.get(ruta)
+    if usar_cache and guardado and ahora - guardado[0] < SEGUNDOS_DE_CACHE:
+        return guardado[1]
+    estado = _comprobar(ruta, ejecutar)
+    if estado.listo:  # solo se recuerda lo que está bien: quien acaba de arreglar algo (iniciar sesión…) no espera 90 s
+        _cache[ruta] = (ahora, estado)
+    else:
+        _cache.pop(ruta, None)
+    return estado
+
+
+def olvidar_comprobaciones() -> None:
+    _cache.clear()
+
+
+def _comprobar(ruta: str, ejecutar: Callable[..., Any]) -> EstadoClaude:
+    codigo, salida, error = _ejecutar_corto([ruta, "--version"], 30, ejecutar)
+    if codigo is None:
+        return EstadoClaude("error", ruta, detalle=error)
+    version_txt = salida.strip().splitlines()[0] if salida.strip() else ""
+    version = _version(version_txt)
+    if version and version < VERSION_MINIMA:
+        return EstadoClaude("antiguo", ruta, ".".join(map(str, version)))
+    numero = ".".join(map(str, version))
+
+    codigo, salida, error = _ejecutar_corto([ruta, "auth", "status"], 45, ejecutar)
+    if codigo is None:
+        return EstadoClaude("error", ruta, numero, detalle=error)
+    datos = _json_de(salida)
+    if datos is None:
+        if re.search(r"unknown command|too many arguments|did you mean", f"{salida}\n{error}", re.I):
+            return EstadoClaude("ok", ruta, numero)  # una versión que aún no sabe contarlo: se confía y se comprueba al usar
+        if codigo == 0:
+            return EstadoClaude("ok", ruta, numero)
+        return EstadoClaude("sin_sesion", ruta, numero, detalle=(error or salida).strip()[:200])
+    metodo = str(datos.get("authMethod") or "")
+    if datos.get("loggedIn") is False or metodo == "none" or codigo not in (0, None) and not metodo:
+        return EstadoClaude("sin_sesion", ruta, numero, metodo)
+    if metodo in METODOS_DE_PAGO_POR_USO:
+        return EstadoClaude("no_es_plan", ruta, numero, metodo)
+    return EstadoClaude("ok", ruta, numero, metodo)
+
+
+def _json_de(texto: str) -> Optional[dict]:
+    """El primer objeto JSON de un texto (tolera avisos antes o después)."""
+    texto = (texto or "").strip()
+    for candidato in (texto, texto[texto.find("{"): texto.rfind("}") + 1] if "{" in texto else ""):
+        if not candidato:
+            continue
+        try:
+            datos = json.loads(candidato)
+        except ValueError:
+            continue
+        if isinstance(datos, dict):
+            return datos
+    return None
+
+
+# ----------------------------------------------------------------------
+# La línea de órdenes
+# ----------------------------------------------------------------------
+
+# Opciones que mejoran el resultado pero no son imprescindibles: si esta versión de Claude Code no las conoce, se
+# quitan y se vuelve a intentar (ver `opcion_rechazada`). La primera palabra de cada tupla es la opción.
+_OPCIONALES: tuple[tuple[str, ...], ...] = (
+    ("--include-partial-messages",),      # ver la respuesta escribirse
+    ("--no-session-persistence",),        # no llenar el historial de Claude Code con cada pregunta
+    ("--tools", ""),                      # sin herramientas: es una conversación, no un agente
+    ("--disable-slash-commands",),        # una pregunta que empiece por «/» no debe ejecutar un comando
+    ("--safe-mode",),                     # sin CLAUDE.md, hooks ni plugins de la persona: respuestas iguales para todos
+)
+MODELO_VALIDO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-\[\]]{0,79}$")
+
+
+def argumentos_de_claude(
+    ruta: str, modelo: str = "", archivo_sistema: Optional[Path] = None, sin: Collection[str] = ()
+) -> list[str]:
+    """La orden que lanza una pregunta. La pregunta NO va aquí: va por la entrada estándar."""
+    orden = [ruta, "-p", "--output-format", "stream-json", "--verbose"]
+    opcionales = list(_OPCIONALES)
+    if archivo_sistema is not None:
+        opcionales.append(("--system-prompt-file", str(archivo_sistema)))
+    for opcion in opcionales:
+        if opcion[0] not in sin:
+            orden.extend(opcion)
+    if modelo and MODELO_VALIDO.match(modelo):
+        orden.extend(["--model", modelo])
+    return orden
+
+
+_OPCION_DESCONOCIDA = re.compile(r"unknown option '(--?[\w-]+)'", re.I)
+_OPCION_SIN_VALOR = re.compile(r"option '(--[\w-]+)[^']*' argument missing", re.I)
+
+
+def opcion_rechazada(texto: str) -> str:
+    """La opción que esta versión de Claude Code no entiende (o a la que no le llegó el valor), si el texto lo dice."""
+    for patron in (_OPCION_DESCONOCIDA, _OPCION_SIN_VALOR):
+        m = patron.search(texto or "")
+        if m:
+            return m.group(1)
+    return ""
+
+
+def texto_del_sistema(instrucciones: str) -> str:
+    instrucciones = (instrucciones or "").strip()
+    if not instrucciones:
+        return SISTEMA_BASE
+    return f"{SISTEMA_BASE}\n\nThe user asks you to follow these instructions in every answer:\n{instrucciones}"
+
+
+# ----------------------------------------------------------------------
+# Lo que Claude Code cuenta del plan
+# ----------------------------------------------------------------------
+
+
+def _desde_epoch(valor: Any, ahora: Optional[datetime] = None) -> Optional[datetime]:
+    """Un instante en segundos (o milisegundos) desde 1970, o None si no tiene sentido."""
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        return None
+    try:
+        segundos = float(valor)
+        if segundos > 10**11:  # milisegundos
+            segundos /= 1000
+        instante = datetime.fromtimestamp(segundos, tz=timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
+    ahora = ahora or datetime.now(timezone.utc)
+    if instante < ahora - timedelta(days=1) or instante > ahora + timedelta(days=MAX_DIAS_HASTA_EL_REINICIO):
+        return None
+    return instante
+
+
+@dataclass
+class VentanaPlan:
+    uso: Optional[float] = None            # porcentaje consumido (0-100), si Claude Code lo dijo
+    reinicia: Optional[datetime] = None    # cuándo se renueva (con zona horaria)
+
+
+@dataclass
+class EstadoPlan:
+    """Lo último que se sabe del cupo del plan."""
+
+    sesion: VentanaPlan = field(default_factory=VentanaPlan)   # la ventana de 5 horas
+    semana: VentanaPlan = field(default_factory=VentanaPlan)   # la ventana semanal
+    situacion: str = ""            # allowed | allowed_warning | rejected
+    usando_extra: bool = False     # Claude Code está gastando créditos extra (de pago)
+    extra_activado: Optional[bool] = None   # la cuenta tiene el «uso extra» activado
+    bloqueado_hasta: Optional[datetime] = None   # hasta cuándo no se puede enviar (un límite alcanzado)
+
+    def conocido(self) -> bool:
+        return any(v is not None for v in (self.sesion.uso, self.sesion.reinicia, self.semana.uso, self.semana.reinicia))
+
+    def resumen(self) -> str:
+        partes = []
+        for nombre, ventana in (("sesión", self.sesion), ("semana", self.semana)):
+            if ventana.uso is None and ventana.reinicia is None:
+                continue
+            texto = f"{nombre} {round(ventana.uso)} %" if ventana.uso is not None else nombre
+            if ventana.reinicia is not None:
+                local = ventana.reinicia.astimezone()
+                dia = "" if local.date() == datetime.now().astimezone().date() else f" {local:%d/%m}"
+                texto += f" (se renueva{dia} a las {local:%H:%M})"
+            partes.append(texto)
+        return " · ".join(partes)
+
+
+def _ventana_de(nombre: str) -> str:
+    return {"five_hour": "sesion", "seven_day": "semana", "seven_day_opus": "opus", "seven_day_sonnet": "sonnet"}.get(
+        nombre or "", "otra" if nombre else "")
+
+
+# ----------------------------------------------------------------------
+# Entender el texto de un límite («You've hit your session limit · resets 3:45pm»)
+# ----------------------------------------------------------------------
+
+_DIAS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+_MESES = {m: i + 1 for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))}
+_ZONA = re.compile(r"\(([A-Za-z][A-Za-z0-9_+\-/]{1,40})\)")
+_HORA_AMPM = re.compile(r"(?<![\d:])(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b\.?", re.I)
+_HORA_24 = re.compile(r"(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])")
+_DIA_SEMANA = re.compile(r"\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b", re.I)
+_FECHA = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b"
+    r"|\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b",
+    re.I,
+)
+_GASTO = re.compile(r"(monthly|individual|org['’]?s|team['’]?s|shared)\b[^.\n]{0,40}\b(spend|budget)|spend limit", re.I)
+
+
+def tipo_de_limite(texto: str) -> str:
+    """'' si el texto no habla de un límite de uso; si no: sesion | semana | opus | sonnet | gasto | otro."""
+    t = (texto or "").lower()
+    if _GASTO.search(t):
+        return "gasto"
+    if "opus limit" in t:
+        return "opus"
+    if "sonnet limit" in t:
+        return "sonnet"
+    if re.search(r"\b(weekly|7-day|seven[- ]day)\b[^.\n]{0,30}\blimit", t):
+        return "semana"
+    if re.search(r"session limit|\b5-hour\b|usage limit reached|your limit will reset|\d+-hour limit", t):
+        return "sesion"
+    if re.search(r"(hit|reached|exceeded) (your |the )?[\w' -]{1,30}limit", t):
+        return "otro"
+    return ""
+
+
+def _zona(nombre: str) -> Optional[tzinfo]:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(nombre)
+    except Exception:  # sin la base de zonas (Windows sin `tzdata`) o un nombre que no existe
+        return None
+
+
+def reinicio_desde_texto(texto: str, ahora: Optional[datetime] = None) -> Optional[datetime]:
+    """Cuándo vuelve el acceso según el texto de Claude Code, o None si no se entiende.
+
+    Entiende «resets 3:45pm», «resets Mon 12:00am», «resets Oct 20, 9am», «resets 15:45 (Europe/Madrid)» y el formato
+    antiguo «usage limit reached|1760000000». Una hora sin zona es la de este equipo: es la que Claude Code enseña.
+    """
+    ahora = ahora or datetime.now().astimezone()
+    if ahora.tzinfo is None:
+        ahora = ahora.astimezone()
+    texto = texto or ""
+
+    m = re.search(r"\|\s*(\d{9,13})\b", texto)
+    if m:
+        return _desde_epoch(int(m.group(1)), ahora)
+
+    m = re.search(r"\bresets?\b(.*)", texto, re.I | re.S)
+    if not m:
+        return None
+    resto = m.group(1)[:90]
+
+    zona: tzinfo = ahora.tzinfo  # type: ignore[assignment]
+    mz = _ZONA.search(resto)
+    if mz:
+        z = _zona(mz.group(1))
+        if z is not None:
+            zona = z
+            ahora = ahora.astimezone(z)
+
+    hora = _buscar_hora(resto)
+    if hora is None:
+        return None
+    h, minuto = hora
+
+    try:
+        fecha = _FECHA.search(resto)
+        dia = _DIA_SEMANA.search(resto)
+        if fecha:
+            nombre_mes = fecha.group(1) or fecha.group(4)
+            dia_mes = int(fecha.group(2) or fecha.group(3))
+            candidato = datetime(ahora.year, _MESES[nombre_mes[:3].lower()], dia_mes, h, minuto, tzinfo=zona)
+            if candidato < ahora - timedelta(days=1):
+                candidato = candidato.replace(year=ahora.year + 1)
+        elif dia:
+            objetivo = _DIAS[dia.group(1).lower()[:3]]
+            candidato = datetime.combine(ahora.date(), dt_time(h, minuto), tzinfo=zona)
+            candidato += timedelta(days=(objetivo - ahora.weekday()) % 7)
+            if candidato <= ahora:
+                candidato += timedelta(days=7)
+        else:
+            candidato = datetime.combine(ahora.date(), dt_time(h, minuto), tzinfo=zona)
+            if candidato <= ahora:
+                candidato += timedelta(days=1)
+    except (ValueError, KeyError, OverflowError):
+        return None
+    if candidato > ahora + timedelta(days=MAX_DIAS_HASTA_EL_REINICIO):
+        return None
+    return candidato
+
+
+def _buscar_hora(texto: str) -> Optional[tuple[int, int]]:
+    m = _HORA_AMPM.search(texto)
+    if m:
+        h = int(m.group(1))
+        if not 1 <= h <= 12:
+            return None
+        return h % 12 + (12 if m.group(3).lower() == "p" else 0), int(m.group(2) or 0)
+    m = _HORA_24.search(texto)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return None
+
+
+# ----------------------------------------------------------------------
+# Leer la salida de `claude -p --output-format stream-json`
+# ----------------------------------------------------------------------
+
+TIPOS_DE_VEREDICTO = ("ok", "limite", "gasto", "creditos", "auth", "cuenta", "modelo", "saturado", "invalido",
+                      "opcion", "otro")
+
+
+@dataclass
+class Veredicto:
+    """Qué pasó con una pregunta."""
+
+    tipo: str
+    texto: str = ""                        # la respuesta (ok) o el mensaje de Claude Code (error)
+    reinicia: Optional[datetime] = None    # limite: cuándo vuelve el acceso, si se sabe
+    ventana: str = ""                      # limite: sesion | semana | opus | sonnet | otro
+    uso: dict = field(default_factory=dict)  # ok: los tokens que dice el resultado
+    stop_reason: str = ""
+    session_id: str = ""
+    usando_extra: bool = False             # el plan se agotó y Claude Code gastó créditos extra con esta pregunta
+    opcion: str = ""                       # opcion: la opción que esta versión no entiende
+    estado_http: Optional[int] = None
+
+
+_ERRORES_DE_AUTENTICACION = ("authentication_failed", "oauth_org_not_allowed")
+_ERRORES_DE_SERVIDOR = ("overloaded", "server_error", "rate_limit", "unknown")
+_PATRON_AUTH = re.compile(
+    r"not logged in|please run /login|run /login|invalid api key|invalid x-api-key|oauth token (has )?(expired|revoked)|"
+    r"authentication[_ ](failed|error)|invalid authentication|please (log in|sign in)|\blogin required\b", re.I)
+_PATRON_CUENTA = re.compile(r"account[_ ]on[_ ]hold|account (is )?(on hold|suspended|disabled)|oauth_org_not_allowed", re.I)
+_PATRON_CREDITOS = re.compile(
+    r"credits?_required|usage credits required|credit balance is too low|billing[_ ]error|out of (usage )?credits", re.I)
+_PATRON_MODELO = re.compile(
+    r"model_not_found|may not exist or you may not have access|issue with the selected model|"
+    r"model[^.\n]{0,40}(not found|not available|does not exist)", re.I)
+_PATRON_INVALIDO = re.compile(r"invalid[_ ]request|prompt is too long|request too large|exceed(s|ed)? the context", re.I)
+_PATRON_SERVIDOR = re.compile(
+    r"overloaded|server is temporarily limiting|temporary capacity|api error: (5\d\d|429)|internal server error|"
+    r"bad gateway|service unavailable|gateway time-?out|econnreset|etimedout|socket hang up|fetch failed|"
+    r"unable to connect|connection (error|refused|reset)|network error|request timed out", re.I)
+
+
+class LectorDeSalida:
+    """Va leyendo, línea a línea, lo que imprime `claude -p --output-format stream-json`.
+
+    No lanza nada ni espera: solo entiende líneas. Así se puede probar sin ningún proceso.
+    """
+
+    def __init__(self) -> None:
+        self.parcial = ""                  # el texto según llega (para enseñarlo escribiéndose)
+        self.texto_final = ""              # el del mensaje completo del asistente
+        self.error_asistente = ""          # `error` del mensaje del asistente: rate_limit, authentication_failed…
+        self.inicio: dict = {}
+        self.resultado: Optional[dict] = None
+        self.rechazo: Optional[dict] = None   # el último `rate_limit_event` con estado «rejected»
+        self.plan = EstadoPlan()
+        self.ajenas: list[str] = []        # líneas que no eran JSON
+        self.reintentos = 0                # `system/api_retry`: Claude Code reintentando por su cuenta
+
+    # -- entrada -----------------------------------------------------------
+
+    def alimentar(self, linea: str, ahora: Optional[datetime] = None) -> str:
+        """Entiende una línea. Devuelve el texto nuevo de la respuesta, si esa línea lo traía."""
+        linea = (linea or "").strip()
+        if not linea:
+            return ""
+        try:
+            obj = json.loads(linea)
+        except ValueError:
+            if len(self.ajenas) < MAX_LINEAS_AJENAS:
+                self.ajenas.append(linea[:300])
+            return ""
+        if not isinstance(obj, dict):
+            return ""
+        tipo = obj.get("type")
+        if tipo == "stream_event":
+            return self._evento_de_flujo(obj)
+        if tipo == "assistant":
+            self._asistente(obj)
+        elif tipo == "system":
+            if obj.get("subtype") == "init":
+                self.inicio = obj
+            elif obj.get("subtype") == "api_retry":
+                self.reintentos += 1
+        elif tipo == "rate_limit_event":
+            self._limite(obj.get("rate_limit_info"), ahora)
+        elif tipo == "result":
+            self.resultado = obj
+        return ""
+
+    def _evento_de_flujo(self, obj: dict) -> str:
+        if obj.get("parent_tool_use_id"):
+            return ""
+        evento = obj.get("event")
+        if not isinstance(evento, dict) or evento.get("type") != "content_block_delta":
+            return ""
+        delta = evento.get("delta")
+        if isinstance(delta, dict) and delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+            self.parcial += delta["text"]
+            return delta["text"]
+        return ""
+
+    def _asistente(self, obj: dict) -> None:
+        if obj.get("parent_tool_use_id"):
+            return
+        mensaje = obj.get("message")
+        if isinstance(mensaje, dict):
+            bloques = mensaje.get("content")
+            if isinstance(bloques, list):
+                texto = "".join(b.get("text", "") for b in bloques if isinstance(b, dict) and b.get("type") == "text"
+                                and isinstance(b.get("text"), str))
+                if texto:
+                    self.texto_final = texto
+        error = obj.get("error")
+        if isinstance(error, str) and error:
+            self.error_asistente = error
+
+    def _limite(self, info: Any, ahora: Optional[datetime]) -> None:
+        if not isinstance(info, dict):
+            return
+        plan = self.plan
+        estado = info.get("status")
+        if isinstance(estado, str):
+            plan.situacion = estado
+        if info.get("isUsingOverage") is True:
+            plan.usando_extra = True
+        if info.get("overageStatus") in ("allowed", "rejected"):
+            plan.extra_activado = info.get("overageStatus") == "allowed"
+
+        bruto = info.get("rateLimitType")
+        nombre: str = bruto if isinstance(bruto, str) else ""
+        reinicio = _desde_epoch(info.get("resetsAt"), ahora)
+        crudas = info.get("unifiedWindows")
+        ventanas: dict = crudas if isinstance(crudas, dict) else {}
+        for clave, destino in (("five_hour", plan.sesion), ("seven_day", plan.semana)):
+            datos = ventanas.get(clave)
+            if isinstance(datos, dict):
+                uso = datos.get("utilization")
+                if isinstance(uso, (int, float)) and not isinstance(uso, bool) and 0 <= uso <= 1000:
+                    destino.uso = float(uso) * 100 if uso <= 1 else float(uso)  # llega como fracción: 0.13 = 13 %
+                destino.reinicia = _desde_epoch(datos.get("resetsAt"), ahora) or destino.reinicia
+        if nombre == "five_hour" and reinicio:
+            plan.sesion.reinicia = reinicio
+        elif nombre == "seven_day" and reinicio:
+            plan.semana.reinicia = reinicio
+
+        if estado in ("allowed", "allowed_warning"):
+            plan.bloqueado_hasta = None
+        if estado == "rejected":
+            propio = {"five_hour": plan.sesion, "seven_day": plan.semana}.get(nombre)
+            para = (propio.reinicia if propio is not None else None) or reinicio
+            rechazo = dict(info)
+            rechazo["_reinicia"] = para
+            rechazo["_ventana"] = _ventana_de(nombre)
+            self.rechazo = rechazo
+            plan.bloqueado_hasta = para
+
+    # -- veredicto -----------------------------------------------------------
+
+    def veredicto(
+        self, codigo: Optional[int] = None, stderr: str = "", ahora: Optional[datetime] = None
+    ) -> Veredicto:
+        """Qué pasó, a partir de todo lo leído, del código de salida del proceso y de su stderr."""
+        ahora = ahora or datetime.now().astimezone()
+        r = self.resultado
+        if r is not None:
+            sesion = str(r.get("session_id") or self.inicio.get("session_id") or "")
+            texto = r.get("result") if isinstance(r.get("result"), str) else ""
+            estado_http = r.get("api_error_status") if isinstance(r.get("api_error_status"), int) else None
+            es_error = bool(r.get("is_error")) or str(r.get("subtype") or "success") != "success"
+            if not es_error:
+                if not texto:
+                    texto = self.texto_final or self.parcial
+                consumo = r.get("usage")
+                uso: dict = consumo if isinstance(consumo, dict) else {}
+                return Veredicto(
+                    "ok", texto, uso=uso, stop_reason=str(r.get("stop_reason") or ""), session_id=sesion,
+                    usando_extra=self.plan.usando_extra,
+                )
+            errores = r.get("errors")                       # lo normal es una lista de textos, pero no nos fiamos
+            if isinstance(errores, str):
+                errores = [errores]
+            elif not isinstance(errores, (list, tuple)):
+                errores = []
+            fuentes = [texto, self.texto_final, self.parcial, *[str(e) for e in errores], stderr]
+            return self._clasificar([f for f in fuentes if f], estado_http, ahora, sesion)
+
+        # Sin línea final. Si Claude Code marcó el mensaje como un error, su texto ES el error; si no, es una respuesta
+        # a medias y lo que explica el fallo es lo que dijo el programa al caerse (se mira después).
+        if self.error_asistente:
+            fuentes = [self.texto_final, self.parcial, stderr, *self.ajenas]
+        else:
+            fuentes = [stderr, *self.ajenas, self.texto_final, self.parcial]
+        if self.rechazo is not None or codigo not in (0, None) or self.error_asistente:
+            return self._clasificar([f for f in fuentes if f], None, ahora, "")
+        detalle = "Claude Code terminó sin dar ninguna respuesta"
+        if codigo == 0:
+            detalle += " (la salida no tenía el formato esperado)"
+        return Veredicto("otro", (stderr or "").strip()[-500:] or detalle)
+
+    def _clasificar(self, fuentes: list[str], estado_http: Optional[int], ahora: datetime, sesion: str) -> Veredicto:
+        todo = "\n".join(fuentes)
+        resumen = (fuentes[0] if fuentes else "").strip()[:500]
+        error = self.error_asistente
+
+        opcion = opcion_rechazada(todo)
+        if opcion:
+            return Veredicto("opcion", resumen, opcion=opcion, session_id=sesion)
+
+        rechazo = self.rechazo
+        if rechazo is not None and rechazo.get("errorCode") == "credits_required":
+            return Veredicto("creditos", resumen, session_id=sesion)
+        if _PATRON_CREDITOS.search(todo):
+            return Veredicto("creditos", resumen, session_id=sesion)
+
+        tipo = ""
+        for fuente in fuentes:
+            tipo = tipo_de_limite(fuente)
+            if tipo:
+                break
+        if tipo == "gasto":
+            return Veredicto("gasto", resumen, session_id=sesion)
+        if rechazo is not None or tipo:
+            reinicia = rechazo.get("_reinicia") if rechazo else None
+            ventana = (rechazo.get("_ventana") if rechazo else "") or (tipo if tipo != "otro" else "")
+            if reinicia is None:
+                for fuente in fuentes:
+                    reinicia = reinicio_desde_texto(fuente, ahora)
+                    if reinicia:
+                        break
+            return Veredicto("limite", resumen, reinicia=reinicia, ventana=ventana or "otro", session_id=sesion)
+
+        if error in _ERRORES_DE_AUTENTICACION or _PATRON_AUTH.search(todo) or estado_http == 401:
+            if error == "oauth_org_not_allowed" or _PATRON_CUENTA.search(todo):
+                return Veredicto("cuenta", resumen, session_id=sesion)
+            return Veredicto("auth", resumen, session_id=sesion)
+        if error == "account_on_hold" or _PATRON_CUENTA.search(todo) or estado_http == 403:
+            return Veredicto("cuenta", resumen, session_id=sesion)
+        if error in ("model_not_found",) or _PATRON_MODELO.search(todo):
+            return Veredicto("modelo", resumen, session_id=sesion)
+        if error in ("invalid_request",) or estado_http in (400, 413, 422) or _PATRON_INVALIDO.search(todo):
+            return Veredicto("invalido", resumen, session_id=sesion, estado_http=estado_http)
+        if (error in _ERRORES_DE_SERVIDOR or (estado_http is not None and (estado_http >= 500 or estado_http in (408, 409, 429)))
+                or _PATRON_SERVIDOR.search(todo)):
+            return Veredicto("saturado", resumen, session_id=sesion, estado_http=estado_http)
+        return Veredicto("otro", resumen or (todo.strip()[:500]), session_id=sesion, estado_http=estado_http)
+
+    # -- comprobaciones al empezar --------------------------------------------
+
+    def usa_clave_de_api(self) -> bool:
+        """True si Claude Code dice (en su evento de inicio) que está usando una clave de API en vez del plan."""
+        origen = self.inicio.get("apiKeySource")
+        return isinstance(origen, str) and origen.strip().lower() not in ORIGENES_SIN_CLAVE
+
+
+# ----------------------------------------------------------------------
+# Un `claude -p` en marcha
+# ----------------------------------------------------------------------
+
+FIN = object()  # lo que `siguiente` devuelve cuando ya no hay más líneas
+
+
+class Ejecucion:
+    """Un `claude -p` lanzado: le da la pregunta, entrega las líneas que imprime y se puede matar."""
+
+    def __init__(self, orden: list[str], entrada: str, entorno: Mapping[str, str], carpeta: Path):
+        self.proc = subprocess.Popen(
+            orden, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=str(carpeta), env=dict(entorno), **_opciones_de_proceso(),
+        )
+        self._lineas: queue.Queue = queue.Queue()
+        self._stderr = bytearray()
+        datos = entrada.encode("utf-8", "replace")
+        self._hilos = [
+            threading.Thread(target=self._escribir, args=(datos,), daemon=True, name="claude-entrada"),
+            threading.Thread(target=self._leer_salida, daemon=True, name="claude-salida"),
+            threading.Thread(target=self._leer_errores, daemon=True, name="claude-errores"),
+        ]
+        for hilo in self._hilos:
+            hilo.start()
+
+    # -- hilos ----------------------------------------------------------------
+
+    def _escribir(self, datos: bytes) -> None:
+        try:
+            self.proc.stdin.write(datos)  # type: ignore[union-attr]
+            self.proc.stdin.close()  # type: ignore[union-attr]
+        except (BrokenPipeError, OSError, ValueError):
+            pass  # el proceso ya terminó o no quiere entrada: lo contará su salida
+
+    def _leer_salida(self) -> None:
+        try:
+            for crudo in iter(self.proc.stdout.readline, b""):  # type: ignore[union-attr]
+                self._lineas.put(crudo.decode("utf-8", "replace"))
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._lineas.put(FIN)
+
+    def _leer_errores(self) -> None:
+        try:
+            for crudo in iter(self.proc.stderr.readline, b""):  # type: ignore[union-attr]
+                self._stderr.extend(crudo)
+                if len(self._stderr) > MAX_BYTES_STDERR:
+                    del self._stderr[: len(self._stderr) - MAX_BYTES_STDERR]
+        except (OSError, ValueError):
+            pass
+
+    # -- uso ------------------------------------------------------------------
+
+    def siguiente(self, espera: float) -> Any:
+        """La siguiente línea de salida, `FIN` si ya no habrá más, o None si pasó `espera` sin nada."""
+        try:
+            return self._lineas.get(timeout=espera)
+        except queue.Empty:
+            return None
+
+    @property
+    def codigo(self) -> Optional[int]:
+        return self.proc.poll()
+
+    def esperar_codigo(self, timeout: float = 10.0) -> Optional[int]:
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+    @property
+    def stderr(self) -> str:
+        if self.proc.poll() is not None:
+            self._hilos[2].join(timeout=1.0)  # que se haya leído todo lo que dejó escrito
+        return bytes(self._stderr).decode("utf-8", "replace")
+
+    def pedir_que_termine(self) -> None:
+        """Avisa al proceso (y a lo que haya lanzado) de que termine, sin esperar a que lo haga."""
+        if self.proc.poll() is not None:
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)], capture_output=True, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)  # type: ignore[attr-defined]
+            else:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
+            pass
+
+    def terminar(self, gracia: float = 3.0) -> None:
+        """Mata el proceso y todo lo que haya lanzado, y espera a que de verdad haya terminado."""
+        if self.proc.poll() is not None:
+            return
+        self.pedir_que_termine()
+        try:
+            self.proc.wait(timeout=gracia)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            if sys.platform == "win32":
+                self.proc.kill()
+            else:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logger.warning("Un proceso de Claude Code no terminó tras matarlo (pid %s)", self.proc.pid)
+
+    def cerrar(self) -> None:
+        """Recoge los hilos y cierra las tuberías. Siempre, también tras matar el proceso."""
+        for hilo in self._hilos:
+            hilo.join(timeout=2)
+        for flujo in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            try:
+                if flujo is not None:
+                    flujo.close()
+            except (OSError, ValueError):
+                pass
+
+
+# ============================================================================
+# 20. Motor del plan de Claude (tu suscripción, sin pagar por token)
+#    (claude_batch_monitor/core/plan.py)
+# ============================================================================
+#
+# Motor del plan de Claude: cada orden se responde con Claude Code (`claude -p`), con el cupo de tu plan.
+#
+# Para quien tiene un plan Pro o Max de Claude y no quiere pagar por token: el programa oficial `claude`, ya conectado a
+# tu cuenta, responde cada pregunta. Aquí no hay precios ni tope de gasto en dólares: lo que se gasta es el cupo del
+# plan, que se renueva solo (una ventana de 5 horas y otra semanal). Cuando se agota, Claude Code lo dice y cuándo
+# vuelve; este motor espera hasta entonces y sigue solo, sin perder ni repetir ninguna respuesta.
+#
+# Reglas que protegen de gastar de más (lo que la persona pidió: «dentro del plan, no con los créditos extra»):
+# - Se lanza `claude` sin ninguna clave de API en el entorno y se comprueba que no use una (ver `claude_code.py`).
+# - Si el plan se agota y Claude Code empieza a gastar créditos extra (`isUsingOverage`), se para en el acto.
+# - Un límite alcanzado se recuerda en disco: si se cierra y se vuelve a abrir antes del reinicio, no se insiste.
+
+
+PRECIOS_DEL_PLAN = Precios(Decimal(0), Decimal(0), Decimal(0), "manual", "plan")
+ESPERA_MINIMA_SEC = 30.0
+MINIMO_TIMEOUT_SEC = 120.0  # Claude Code reintenta por su cuenta y puede tardar: nunca se le da menos que esto
+# El tiempo de espera cuenta desde la ÚLTIMA línea que llegó, no desde que empezó: una respuesta larga que va llegando
+# no se mata a medias (se perdería lo gastado). Por si algo gotea para siempre, hay también un tope en total.
+TOPE_TOTAL_SEC = 3600.0
+# Si Claude Code dice que se alcanzó el límite pero no cuándo vuelve: se reintenta con esperas crecientes.
+ESPERAS_SIN_REINICIO_SEC = (300.0, 600.0, 900.0, 1800.0)
+MAX_ESPERAS_SIN_REINICIO = 16          # unas 7 horas
+MAX_ESPERAS_SIN_REINICIO_SEMANAL = 340  # unos 7 días a razón de media hora
+MINIMO_DE_ESPERA_TRAS_VARIOS_RECHAZOS_SEC = 1800.0
+NOMBRE_DE_LA_VENTANA = {
+    "sesion": "la sesión de 5 horas",
+    "semana": "la semana",
+    "opus": "el cupo semanal de Opus",
+    "sonnet": "el cupo semanal de Sonnet",
+    "otro": "el cupo",
+}
+OPCIONES_QUE_SE_PUEDEN_QUITAR = (
+    "--include-partial-messages", "--no-session-persistence", "--tools", "--disable-slash-commands", "--safe-mode",
+    "--system-prompt-file",
+)
+
+
+def _duracion(segundos: float) -> str:
+    segundos = max(0, int(round(segundos)))
+    horas, resto = divmod(segundos, 3600)
+    minutos = resto // 60
+    if horas:
+        return f"{horas} h {minutos:02d} min"
+    if minutos:
+        return f"{minutos} min"
+    return f"{segundos} s"
+
+
+def _respuesta_de(v: Veredicto) -> Any:
+    """Lo que `registrar_respuesta` espera de una respuesta (es la forma de la de la API de mensajes)."""
+    uso = v.uso or {}
+
+    def n(clave: str) -> int:
+        valor = uso.get(clave)
+        return valor if isinstance(valor, int) and not isinstance(valor, bool) and valor >= 0 else 0
+
+    return SimpleNamespace(
+        content=[SimpleNamespace(text=v.texto)],
+        usage=SimpleNamespace(
+            input_tokens=n("input_tokens"), output_tokens=n("output_tokens"),
+            cache_read_input_tokens=n("cache_read_input_tokens"),
+            cache_creation_input_tokens=n("cache_creation_input_tokens"),
+        ),
+        stop_reason=v.stop_reason or "end_turn",
+    )
+
+
+class PlanEngine(EngineBase):
+    """Responde las órdenes pendientes una a una con Claude Code, esperando a que el plan se renueve si hace falta."""
+
+    def __init__(self, config: Configuracion, job: Job):
+        super().__init__(config, job)
+        self.precios = PRECIOS_DEL_PLAN  # con el plan no se paga por token: todo cuesta 0
+        self.plan = EstadoPlan()
+        self._ruta = ""
+        self._sin: set[str] = set()                  # opciones que esta versión de Claude Code no entiende
+        self._archivo_sistema: Optional[Any] = None
+        self._ejecucion: Optional[Ejecucion] = None
+        self._lock_ejecucion = threading.Lock()
+        self._esperas_sin_reinicio = 0
+        self._rechazos_seguidos = 0
+        self.problema = ""  # por qué se paró, en una palabra (la ventana redacta su propio aviso): ver `_abortar`
+
+    # ------------------------------------------------------------------
+    # Bucle principal
+    # ------------------------------------------------------------------
+
+    def ejecutar(self, cb: Optional[Callbacks] = None) -> StopReason:
+        cb = cb or Callbacks()
+        self.deadline = self.calcular_deadline()
+        ciclo = self.job.ciclos_completados + 1
+        logger.info("Lote %s iniciado con el plan de Claude: %d órdenes", self.job.job_id, self.job.total_count())
+        try:
+            if self._preparar(cb):
+                self._recorrer(ciclo, cb)
+        finally:
+            self._matar_ejecucion(esperar=True)
+            self.cerrar_ciclo(ciclo, cb)
+        return self._finalizar()
+
+    def inicializar_cliente(self) -> None:  # no hay cliente de la API
+        return None
+
+    def detener(self) -> None:
+        super().detener()
+        self._matar_ejecucion(esperar=False)  # no bloquea a quien pulsa «Detener»: el hilo del motor termina el trabajo
+
+    def _preparar(self, cb: Callbacks) -> bool:
+        estado = comprobar_claude(self.config.ruta_claude)
+        if not estado.listo:
+            self._abortar(cb, estado.explicacion(), problema=estado.estado)
+            return False
+        self._ruta = estado.ruta
+        self._escribir_sistema()
+        bloqueado = self._bloqueo_recordado()
+        if bloqueado is not None:
+            self.plan.bloqueado_hasta = bloqueado
+        return True
+
+    def _recorrer(self, ciclo: int, cb: Callbacks) -> None:
+        vistas: set[int] = set()
+        while not self._debe_parar():
+            pendientes = [m for m in self.job.pendientes() if m.id not in vistas]
+            if not pendientes:
+                return
+            msg = pendientes[0]
+            vistas.add(msg.id)
+            if not self._procesar_mensaje(msg, ciclo, cb):
+                return
+            if self.job.pendientes() and not self._pausa_entre_ordenes(cb):
+                return
+
+    def _pausa_entre_ordenes(self, cb: Callbacks) -> bool:
+        d = self.config.pausa_entre_mensajes_sec
+        if d <= 0:
+            return True
+        cb.emit("estado", f"Pausa de cortesía ({d}s)...", False)
+        return self.esperar(d, cb)
+
+    # ------------------------------------------------------------------
+    # Una orden
+    # ------------------------------------------------------------------
+
+    def _procesar_mensaje(self, msg: JobMessage, ciclo: int, cb: Callbacks) -> bool:
+        """Procesa UNA orden hasta terminarla. False si hay que parar todo."""
+        total = self.job.total_count()
+        cont = Contadores()
+        while True:
+            if self._debe_parar() or not self._esperar_franja(cb) or not self._esperar_si_bloqueado(cb):
+                return False
+            cb.emit("inicio_orden", msg)
+            cb.emit("estado", f"[Ciclo {ciclo} | Orden {msg.id}/{total}] Preguntando a Claude Code…", True)
+            veredicto, ms = self._preguntar(msg, cb)
+            if veredicto is None:
+                return False
+            self._anotar_plan(cb)
+            decision = self._atender(veredicto, msg, ciclo, cb, cont, ms)
+            if decision is Decision.PARAR:
+                return False
+            if decision is Decision.SIGUIENTE:
+                return True
+
+    def _atender(
+        self, v: Veredicto, msg: JobMessage, ciclo: int, cb: Callbacks, cont: Contadores, ms: int
+    ) -> Decision:
+        """Qué hacer con lo que pasó. REINTENTAR = volver a preguntar la misma orden."""
+        if v.tipo == "ok":
+            self._esperas_sin_reinicio = self._rechazos_seguidos = 0
+            self._desbloquear()
+            if not self.registrar_respuesta(msg, _respuesta_de(v), ciclo, cb, ms, comprobar_tope=False):
+                return Decision.PARAR
+            if v.usando_extra:
+                self._parar_por_uso_extra(cb)
+                return Decision.PARAR
+            return Decision.SIGUIENTE
+
+        if v.tipo == "limite":
+            return Decision.REINTENTAR if self._esperar_al_reinicio(v, cb) else Decision.PARAR
+
+        if v.tipo == "creditos":
+            self._abortar(
+                cb,
+                "Tu plan se ha quedado sin uso incluido y Claude Code pide créditos de pago para seguir. Este "
+                "programa no los gasta. Cuando el plan se renueve, pulsa «Reanudar».",
+                StopReason.NO_CREDIT, "creditos",
+            )
+            return Decision.PARAR
+
+        if v.tipo == "gasto":
+            self._abortar(
+                cb,
+                "Has llegado a un límite de gasto de tu cuenta de Claude. Súbelo en https://claude.ai/settings/usage "
+                f"o espera a que se renueve, y pulsa «Reanudar». (Claude Code dijo: «{v.texto}»)",
+                StopReason.ACCOUNT_LIMIT, "gasto",
+            )
+            return Decision.PARAR
+
+        if v.tipo in ("auth", "cuenta"):
+            if v.tipo == "auth":
+                texto = ("Claude Code no tiene la sesión iniciada, o ha caducado. En una terminal ejecuta:  "
+                         "claude auth login  y luego pulsa «Reanudar».")
+            else:
+                texto = ("Tu cuenta de Claude no puede usar Claude Code ahora (en espera, suspendida o sin permiso para "
+                         f"tu organización). Claude Code dijo: «{v.texto}»")
+            self._abortar(cb, texto, problema=v.tipo)
+            return Decision.PARAR
+
+        if v.tipo == "modelo":
+            elegido = self.config.modelo_plan or "el predeterminado"
+            detalle = (f"Tu plan no permite el modelo «{elegido}» o no existe. Elige otro en Opciones "
+                       f"(o déjalo en blanco para usar el de tu plan). Claude Code dijo: «{v.texto}»")
+            self.marcar_fallo(msg, detalle, cb, "model_not_found")
+            self._abortar(cb, detalle, problema="modelo")
+            return Decision.PARAR
+
+        if v.tipo == "invalido":
+            detalle = f"Claude Code rechazó esta pregunta: {v.texto}"
+            self.marcar_fallo(msg, detalle, cb, "bad_request")
+            cb.emit("error", detalle)
+            return Decision.SIGUIENTE
+
+        if v.tipo == "opcion":
+            if v.opcion in OPCIONES_QUE_SE_PUEDEN_QUITAR and v.opcion not in self._sin:
+                logger.warning("Esta versión de Claude Code no entiende %s: se prueba sin ella", v.opcion)
+                self._sin.add(v.opcion)
+                return Decision.REINTENTAR
+            self._abortar(cb, "Esta versión de Claude Code no es compatible con el programa. Actualízala con:  "
+                              f"claude update  (no entiende la opción {v.opcion}).", problema="antiguo")
+            return Decision.PARAR
+
+        que = "Claude Code no pudo responder ahora" if v.tipo == "saturado" else "Claude Code falló"
+        decision = self._reintentar_con_backoff(msg, RuntimeError(v.texto), cb, cont, f"{que} ({v.texto[:120]})")
+        return decision
+
+    # ------------------------------------------------------------------
+    # Lanzar Claude Code
+    # ------------------------------------------------------------------
+
+    def _escribir_sistema(self) -> None:
+        """Las instrucciones van en un archivo (`--system-prompt-file`): nada de texto de la persona en la línea de órdenes."""
+        ruta = carpeta_de_trabajo() / "instrucciones.txt"
+        try:
+            write_atomic(ruta, texto_del_sistema(self.config.system_prompt))
+        except OSError:
+            logger.exception("No se pudo escribir el archivo de instrucciones")
+            self._sin.add("--system-prompt-file")
+            return
+        self._archivo_sistema = ruta
+
+    def _entrada(self, msg: JobMessage) -> str:
+        texto = msg.text
+        if "--system-prompt-file" in self._sin or self._archivo_sistema is None:
+            instrucciones = (self.config.system_prompt or "").strip()
+            if instrucciones:  # sin archivo de sistema, las instrucciones viajan con la pregunta
+                texto = f"[Instructions for this answer: {instrucciones}]\n\n{texto}"
+        if "--disable-slash-commands" in self._sin and texto.lstrip().startswith("/"):
+            texto = f"Pregunta: {texto}"  # que no se tome por un comando de Claude Code
+        return texto
+
+    def _preguntar(self, msg: JobMessage, cb: Callbacks) -> tuple[Optional[Veredicto], int]:
+        """Lanza `claude -p` con la pregunta y espera su desenlace. (None, 0) si hay que parar todo."""
+        orden = argumentos_de_claude(
+            self._ruta, self.config.modelo_plan, None if "--system-prompt-file" in self._sin else self._archivo_sistema,
+            self._sin,
+        )
+        try:
+            ejecucion = Ejecucion(orden, self._entrada(msg), entorno_para_el_plan(), carpeta_de_trabajo())
+        except OSError as error:
+            self._abortar(cb, f"No se pudo ejecutar Claude Code ({self._ruta}): {error}", problema="error")
+            return None, 0
+        with self._lock_ejecucion:
+            self._ejecucion = ejecucion
+        lector = LectorDeSalida()
+        inicio = ultima = time.monotonic()
+        limite = max(float(self.config.timeout_api_sec), MINIMO_TIMEOUT_SEC)
+        comprobado = False
+        agotado = False
+        try:
+            while True:
+                if self.evento_detener.is_set():  # la persona pulsó «Detener» (la hora límite espera a que acabe esta)
+                    ejecucion.terminar()
+                    return None, 0
+                ahora = time.monotonic()
+                if ahora - ultima > limite or ahora - inicio > max(TOPE_TOTAL_SEC, limite):
+                    agotado = True
+                    ejecucion.terminar()
+                    break
+                linea = ejecucion.siguiente(0.25)
+                if linea is None:
+                    continue
+                ultima = time.monotonic()
+                if linea is FIN:
+                    break
+                nuevo = lector.alimentar(linea)
+                if nuevo:
+                    cb.emit("delta", msg.id, nuevo)
+                if lector.inicio and not comprobado:
+                    comprobado = True
+                    if lector.usa_clave_de_api():  # antes de que se envíe nada: se corta
+                        ejecucion.terminar()
+                        self._abortar(
+                            cb,
+                            "Claude Code dice que está usando una clave de API, no tu plan, y eso se paga por token. "
+                            "No se ha enviado nada. Quita la clave (variable ANTHROPIC_API_KEY o «apiKeyHelper» de "
+                            "Claude Code) o inicia sesión con tu cuenta:  claude auth login",
+                            problema="clave_de_api",
+                        )
+                        return None, 0
+            codigo = ejecucion.esperar_codigo(15)
+            if codigo is None:
+                ejecucion.terminar()
+            if self.evento_detener.is_set():
+                return None, 0
+            ms = int((time.monotonic() - inicio) * 1000)
+            if agotado:
+                return Veredicto("saturado", f"Claude Code no dio señales de vida en {int(limite)} s"), ms
+            self._mezclar_plan(lector.plan)
+            return lector.veredicto(ejecucion.codigo, ejecucion.stderr), ms
+        finally:
+            ejecucion.terminar()
+            ejecucion.cerrar()
+            with self._lock_ejecucion:
+                if self._ejecucion is ejecucion:
+                    self._ejecucion = None
+
+    def _matar_ejecucion(self, esperar: bool) -> None:
+        with self._lock_ejecucion:
+            ejecucion = self._ejecucion
+        if ejecucion is None:
+            return
+        if esperar:
+            ejecucion.terminar()
+        else:
+            ejecucion.pedir_que_termine()
+
+    # ------------------------------------------------------------------
+    # El cupo del plan
+    # ------------------------------------------------------------------
+
+    def _mezclar_plan(self, nuevo: EstadoPlan) -> None:
+        """Lo leído en esta pregunta se suma a lo ya sabido (lo que no se dijo, no se borra)."""
+        actual = self.plan
+        for propia, ajena in ((actual.sesion, nuevo.sesion), (actual.semana, nuevo.semana)):
+            if ajena.uso is not None:
+                propia.uso = ajena.uso
+            if ajena.reinicia is not None:
+                propia.reinicia = ajena.reinicia
+        if nuevo.situacion:
+            actual.situacion = nuevo.situacion
+        if nuevo.extra_activado is not None:
+            actual.extra_activado = nuevo.extra_activado
+        actual.usando_extra = actual.usando_extra or nuevo.usando_extra
+        if nuevo.bloqueado_hasta is not None:
+            actual.bloqueado_hasta = nuevo.bloqueado_hasta
+
+    def _anotar_plan(self, cb: Callbacks) -> None:
+        if self.plan.conocido():
+            cb.emit("plan", copy.deepcopy(self.plan))
+
+    def _esperar_al_reinicio(self, v: Veredicto, cb: Callbacks) -> bool:
+        """El plan dijo que no hay más por ahora: espera a que se renueve. False si se interrumpió o se rindió."""
+        ahora = datetime.now(timezone.utc)
+        self._rechazos_seguidos += 1
+        reinicia = v.reinicia
+        if reinicia is not None:
+            hasta = reinicia + timedelta(seconds=MARGEN_TRAS_EL_REINICIO_SEC)
+            if hasta <= ahora:  # ya debería haber vuelto y sigue sin dejar: no se insiste cada medio minuto
+                extra = min(ESPERA_MINIMA_SEC * 2 ** (self._rechazos_seguidos - 1), MINIMO_DE_ESPERA_TRAS_VARIOS_RECHAZOS_SEC)
+                hasta = ahora + timedelta(seconds=extra)
+        else:
+            limite = MAX_ESPERAS_SIN_REINICIO_SEMANAL if v.ventana == "semana" else MAX_ESPERAS_SIN_REINICIO
+            if self._esperas_sin_reinicio >= limite:
+                self._abortar(
+                    cb,
+                    "Claude Code dice que se alcanzó el límite de tu plan pero no cuándo vuelve, y tras esperar mucho "
+                    f"sigue igual. Revisa tu uso en https://claude.ai/settings/usage. (Dijo: «{v.texto}»)",
+                    problema="limite_sin_hora",
+                )
+                return False
+            pasos = ESPERAS_SIN_REINICIO_SEC
+            hasta = ahora + timedelta(seconds=pasos[min(self._esperas_sin_reinicio, len(pasos) - 1)])
+            self._esperas_sin_reinicio += 1
+        self._bloquear(hasta)
+        return self._esperar_plan(hasta, v.ventana or "otro", cb, v.reinicia is not None)
+
+    def _esperar_si_bloqueado(self, cb: Callbacks) -> bool:
+        hasta = self.plan.bloqueado_hasta
+        if hasta is None or hasta <= datetime.now(timezone.utc):
+            return True
+        return self._esperar_plan(hasta, "", cb, True)
+
+    def _esperar_plan(self, hasta: datetime, ventana: str, cb: Callbacks, exacta: bool) -> bool:
+        segundos = (hasta - datetime.now(timezone.utc)).total_seconds()
+        local = hasta.astimezone()
+        cual = NOMBRE_DE_LA_VENTANA.get(ventana, "")
+        dia = "" if local.date() == datetime.now().astimezone().date() else f" del {local:%d/%m}"
+        cuando = f"a las {local:%H:%M}{dia}" if exacta else f"en unos {_duracion(segundos)}"
+        texto = (f"Has llegado al límite de tu plan{f' ({cual})' if cual else ''}. "
+                 f"Sigo solo {cuando} (faltan {_duracion(segundos)}).")
+        logger.info(texto)
+        cb.emit("espera", "plan", max(0.0, segundos))
+        cb.emit("estado", texto, False)
+        self._avisar("Límite del plan alcanzado", texto)
+        if not self._esperar_hasta(hasta, cb):
+            return False
+        self._desbloquear()
+        return True
+
+    def _bloquear(self, hasta: datetime) -> None:
+        self.plan.bloqueado_hasta = hasta
+        with self._lock_estado:
+            self.estado.plan_bloqueado_hasta = hasta.astimezone(timezone.utc).isoformat()
+            self.estado.guardar()
+
+    def _desbloquear(self) -> None:
+        self.plan.bloqueado_hasta = None
+        with self._lock_estado:
+            if self.estado.plan_bloqueado_hasta:
+                self.estado.plan_bloqueado_hasta = ""
+                self.estado.guardar()
+
+    def _bloqueo_recordado(self) -> Optional[datetime]:
+        """Un límite alcanzado en una ejecución anterior que todavía no ha terminado."""
+        texto = self.estado.plan_bloqueado_hasta
+        if not texto:
+            return None
+        try:
+            hasta = datetime.fromisoformat(texto)
+        except ValueError:
+            return None
+        if hasta.tzinfo is None:
+            hasta = hasta.replace(tzinfo=timezone.utc)
+        return hasta if hasta > datetime.now(timezone.utc) else None
+
+    # ------------------------------------------------------------------
+    # Paradas
+    # ------------------------------------------------------------------
+
+    def _abortar(self, cb: Callbacks, texto: str, razon: StopReason = StopReason.FATAL, problema: str = "") -> None:
+        logger.error(texto)
+        self.problema = problema
+        cb.emit("error", texto)
+        self._avisar("Cola detenida", texto)
+        self.marcar_parada(razon)
+
+    def _parar_por_uso_extra(self, cb: Callbacks) -> None:
+        self._abortar(
+            cb,
+            "Tu plan se ha agotado y Claude Code ha empezado a gastar créditos extra (de pago) con la última pregunta "
+            "(ya está respondida y guardada). Se ha detenido todo para no gastar más. Si no quieres que Claude use "
+            "créditos extra, desactívalos en https://claude.ai/settings/usage. Cuando el plan se renueve, pulsa «Reanudar».",
+            StopReason.EXTRA_USAGE, "uso_extra",
+        )
+
+
+# ============================================================================
+# 21. Clave de API y elección de modelo
 #    (claude_batch_monitor/claves.py)
 # ============================================================================
 #
@@ -4288,13 +5845,15 @@ class ErrorDeClave(Exception):
 
     def __init__(self, tipo: str, detalle: str = ""):
         super().__init__(detalle or tipo)
-        self.tipo = tipo  # invalida | sin_conexion | otro
+        self.tipo = tipo  # invalida | sin_conexion | libreria | otro
         self.detalle = detalle
 
 
 def _crear_cliente(clave: str) -> Any:
-    import anthropic
-
+    try:
+        import anthropic
+    except ImportError as error:  # solo pasa si se eligió la API sin haber instalado su librería
+        raise ErrorDeClave("libreria") from error
     return anthropic.Anthropic(api_key=clave, timeout=15, max_retries=0)
 
 
@@ -4385,306 +5944,7 @@ def guardar_clave(clave: str) -> str:
 
 
 # ============================================================================
-# 19. La cola del modo simple
-#    (claude_batch_monitor/cola.py)
-# ============================================================================
-#
-# La cola de preguntas del modo simple.
-#
-# Una persona escribe preguntas; la cola las guarda en disco, las envía una a una
-# en un hilo aparte y, si la API pide esperar (límite por minuto, servidor saturado,
-# sin conexión), espera sola y continúa. Se pueden añadir preguntas mientras se
-# envía y, si se cierra el programa, lo pendiente sigue ahí al volver a abrirlo.
-#
-# Esta clase NO sabe nada de ventanas: informa de lo que ocurre a través de
-# `EventosCola`, y cada evento se entrega mediante `publicar` (en la interfaz,
-# el puente que lo ejecuta en el hilo de la ventana). Eso la hace probable sin
-# pantalla.
-
-
-ETIQUETA = "cola"
-
-
-@dataclass(frozen=True)
-class EstadoCola:
-    """Qué está haciendo la cola ahora mismo (lo que se le cuenta a la persona)."""
-
-    tipo: str = "idle"  # idle | sending | waiting | paused | stopped
-    motivo: str = ""    # waiting: rate_limit | server | sin_conexion | cuota
-    razon: Optional[StopReason] = None  # stopped: por qué
-    msg_id: Optional[int] = None
-    segundos: float = 0.0
-    texto: str = ""     # detalle (mensaje de error de la API, ya redactado)
-
-
-class EventosCola:
-    """Lo que la interfaz recibe. Los métodos por defecto no hacen nada."""
-
-    def orden_cambiada(self, msg: JobMessage) -> None: ...
-    def estado(self, estado: EstadoCola) -> None: ...
-    def cuenta_atras(self, restante: float) -> None: ...
-    def delta(self, msg_id: int, texto: str) -> None: ...
-    def gasto(self, usd: Decimal) -> None: ...
-    def error(self, texto: str) -> None: ...
-
-
-FabricaMotor = Callable[[Configuracion, Job], Any]
-
-
-class Cola:
-    def __init__(
-        self,
-        config: Configuracion,
-        eventos: Optional[EventosCola] = None,
-        publicar: Optional[Callable[[Callable[[], None]], None]] = None,
-        fabrica: FabricaMotor = SequentialEngine,
-        job: Optional[Job] = None,
-    ):
-        self.config = config
-        self.eventos = eventos or EventosCola()
-        self._publicar = publicar or (lambda f: f())
-        self._fabrica = fabrica
-        self.job = job
-        self.notificaciones = True
-
-        self._lock = threading.RLock()
-        self._hilo: Optional[threading.Thread] = None
-        self._motor: Any = None
-        self._pausada = False
-        self._enviando: Optional[int] = None
-        self.estado = EstadoCola()
-        self.ultimo_error = ""
-
-    # ------------------------------------------------------------------
-    # Estado
-    # ------------------------------------------------------------------
-
-    @property
-    def activa(self) -> bool:
-        with self._lock:
-            return self._hilo is not None and self._hilo.is_alive()
-
-    @property
-    def pausada(self) -> bool:
-        return self._pausada
-
-    def preguntas(self) -> list[JobMessage]:
-        return list(self.job.messages) if self.job else []
-
-    def pendientes(self) -> int:
-        return len(self.job.pendientes()) if self.job else 0
-
-    def gastado(self) -> Decimal:
-        return self.job.coste_total() if self.job else Decimal(0)
-
-    def cargar_ultima(self) -> int:
-        """Recupera la cola de la sesión anterior. Devuelve cuántas preguntas quedan pendientes."""
-        lotes = listar_jobs(etiqueta=ETIQUETA)
-        if lotes:
-            self.job = Job.load(lotes[0]["job_id"])
-        return self.pendientes()
-
-    def _config_de_envio(self) -> Configuracion:
-        """La configuración con la que se envía, con los ajustes que fija el modo simple."""
-        return replace(
-            self.config,
-            modo="inmediato",
-            concurrencia=1,
-            streaming=True,
-            pausa_entre_mensajes_sec=0,
-            estimar_antes_de_enviar=True,
-            reset_gasto_por_lote=True,  # el tope es por cola: parte de lo que esta cola ya gastó
-            modo_continuo=False,
-            hora_limite="",
-        )
-
-    # ------------------------------------------------------------------
-    # Acciones de la persona
-    # ------------------------------------------------------------------
-
-    def agregar(self, texto: str) -> Optional[JobMessage]:
-        """Añade una pregunta a la cola y, si no está pausada, empieza a enviarla."""
-        texto = (texto or "").strip()
-        if not texto:
-            return None
-        with self._lock:
-            if self.job is None:
-                self.job = Job.crear([], self._config_de_envio(), etiqueta=ETIQUETA)
-                self.job.save()
-            msg = self.job.agregar_orden(texto)
-        self._emitir(self.eventos.orden_cambiada, msg)
-        self._despertar()
-        return msg
-
-    def pausar(self) -> None:
-        with self._lock:
-            self._pausada = True
-            if self._motor is not None:
-                self._motor.detener()  # termina la pregunta en curso y no envía más
-        self._set_estado(EstadoCola("paused"))
-
-    def reanudar(self) -> None:
-        """Quita la pausa y vuelve a intentar lo pendiente (y lo que falló: tras arreglar la causa)."""
-        with self._lock:
-            self._pausada = False
-            self.ultimo_error = ""
-            if self.job is not None and self.job.reintentar_fallidas():
-                for m in self.job.messages:
-                    self._emitir(self.eventos.orden_cambiada, m)
-        self._despertar()
-
-    def quitar(self, msg_id: int) -> bool:
-        """Saca una pregunta de la cola si aún no se ha enviado."""
-        with self._lock:
-            msg = self.job.mensaje(msg_id) if self.job else None
-            if msg is None or msg.status != STATUS_PENDING or self._enviando == msg_id:
-                return False
-            msg.status = STATUS_SKIPPED
-            msg.detalle = "Quitada de la cola."
-            self.job.save()
-        self._emitir(self.eventos.orden_cambiada, msg)
-        return True
-
-    def nueva(self) -> bool:
-        """Empieza una cola en blanco (la anterior queda guardada en disco). Solo si está en reposo."""
-        with self._lock:
-            if self.activa:
-                return False
-            self.job = None
-            self._pausada = False
-            self.ultimo_error = ""
-        self._set_estado(EstadoCola("idle"))
-        return True
-
-    def actualizar_config(self, config: Configuracion) -> None:
-        """Los cambios (tope, modelo…) valen para el siguiente envío."""
-        with self._lock:
-            self.config = config
-
-    def cerrar(self, timeout: float = 5.0) -> None:
-        """Para el hilo. Lo pendiente queda guardado y seguirá la próxima vez."""
-        with self._lock:
-            self._pausada = True
-            motor, hilo = self._motor, self._hilo
-            if motor is not None:
-                motor.detener()
-        if hilo is not None and hilo.is_alive():
-            hilo.join(timeout)
-
-    # ------------------------------------------------------------------
-    # El hilo
-    # ------------------------------------------------------------------
-
-    def _despertar(self) -> None:
-        with self._lock:
-            if self._pausada or self.job is None or not self.job.pendientes():
-                return
-            if self._hilo is not None and self._hilo.is_alive():
-                return  # el bucle recogerá lo nuevo cuando termine con lo actual
-            self._hilo = threading.Thread(target=self._bucle, name="cola-de-preguntas", daemon=True)
-            self._hilo.start()
-
-    def _bucle(self) -> None:
-        while True:
-            with self._lock:
-                if self._pausada or self.job is None or not self.job.pendientes():
-                    # Decidir salir y soltar el hilo en el MISMO cerrojo: así una pregunta
-                    # añadida justo ahora no se queda esperando a nadie.
-                    self._hilo = None
-                    self._enviando = None
-                    self._set_estado(EstadoCola("paused" if self._pausada and self.pendientes() else "idle"))
-                    return
-                try:
-                    motor = self._fabrica(self._config_de_envio(), self.job)
-                    motor.notificaciones = self.notificaciones
-                except Exception as error:
-                    # Sin esto el hilo moría con la excepción sin capturar y la ventana se
-                    # quedaba sin saber nada: ni error, ni estado, ni forma de reintentar.
-                    logger.exception("No se pudo preparar el envío")
-                    self.ultimo_error = f"No se pudo preparar el envío: {error}"
-                    self._emitir(self.eventos.error, self.ultimo_error)
-                    self._hilo = None
-                    self._enviando = None
-                    self._set_estado(EstadoCola("stopped", razon=StopReason.FATAL, texto=self.ultimo_error))
-                    return
-                self._motor = motor
-            try:
-                # Mientras hay algo que enviar o esperando, el equipo no debe dormirse (si no, «espera sola» sería falso).
-                # En Windows esto es POR HILO, así que se activa y se suelta aquí, en el hilo que trabaja.
-                with KeepAwake():
-                    razon = motor.ejecutar(self._callbacks())
-            except Exception as error:  # pragma: no cover - defensa; el motor ya captura casi todo
-                logger.exception("Fallo inesperado en la cola")
-                self.ultimo_error = f"Error inesperado: {error}"
-                self._emitir(self.eventos.error, self.ultimo_error)
-                razon = StopReason.FATAL
-            with self._lock:
-                self._motor = None
-                self._enviando = None
-                if razon is StopReason.COMPLETED:
-                    continue  # ¿llegó algo mientras tanto? el bucle lo comprueba arriba
-                if razon is StopReason.STOPPED and self._pausada:
-                    continue  # la pausa se resuelve arriba, con el estado correcto
-                self._hilo = None
-                self._set_estado(EstadoCola("stopped", razon=razon, texto=self.ultimo_error))
-                return
-
-    def _callbacks(self) -> Callbacks:
-        def estado(texto: str, activo: bool) -> None:
-            pass  # el texto del motor está en español; la interfaz redacta el suyo
-
-        def inicio_orden(msg: JobMessage) -> None:
-            self._enviando = msg.id
-            self._set_estado(EstadoCola("sending", msg_id=msg.id))
-
-        def resultado(msg: JobMessage) -> None:
-            if self._enviando == msg.id and msg.status != STATUS_PENDING:
-                self._enviando = None
-            self._emitir(self.eventos.orden_cambiada, msg)
-
-        def espera(motivo: str, segundos: float) -> None:
-            self._set_estado(EstadoCola("waiting", motivo=motivo, segundos=segundos, msg_id=self._enviando))
-
-        def tick(total: float, restante: float) -> None:
-            self._emitir(self.eventos.cuenta_atras, restante)
-
-        def gasto(usd: Decimal, consumo: Any) -> None:
-            self._emitir(self.eventos.gasto, usd)
-
-        def error(texto: str) -> None:
-            self.ultimo_error = texto
-            self._emitir(self.eventos.error, texto)
-
-        def delta(msg_id: int, texto: str) -> None:
-            self._emitir(self.eventos.delta, msg_id, texto)
-
-        return Callbacks(
-            estado=estado, inicio_orden=inicio_orden, resultado=resultado, espera=espera,
-            tick=tick, gasto=gasto, error=error, delta=delta,
-        )
-
-    # ------------------------------------------------------------------
-
-    def _set_estado(self, estado: EstadoCola) -> None:
-        self.estado = estado
-        self._emitir(self.eventos.estado, estado)
-
-    def _emitir(self, metodo: Callable[..., None], *args: Any) -> None:
-        def entregar() -> None:
-            try:
-                metodo(*args)
-            except Exception:
-                logger.exception("Fallo en un evento de la cola")
-
-        self._publicar(entregar)
-
-
-def hay_fallidas(job: Optional[Job]) -> bool:
-    return bool(job and any(m.status == STATUS_FAILED for m in job.messages))
-
-
-# ============================================================================
-# 20. Ejecutar un lote en segundo plano (modo avanzado)
+# 22. Ejecutar un lote en segundo plano (modo avanzado) y elegir el motor
 #    (claude_batch_monitor/ejecutor.py)
 # ============================================================================
 #
@@ -4707,11 +5967,14 @@ class EventosLote:
     def error(self, texto: str) -> None: ...
     def tick(self, total: float, restante: float) -> None: ...
     def gasto(self, usd: Decimal, consumo: Consumo) -> None: ...
+    def plan(self, estado: Any) -> None: ...
     def terminado(self, razon: StopReason, job: Job) -> None: ...
 
 
 def motor_para(config: Configuracion, job: Job) -> Any:
-    """El motor que toca según el modo: inmediato (una petición por orden) o lote (Batches API)."""
+    """El motor que toca según el modo: inmediato (una petición por orden), lote (Batches API) o plan de Claude."""
+    if config.es_plan:
+        return PlanEngine(config, job)
     return (BatchEngine if config.es_lote else SequentialEngine)(config, job)
 
 
@@ -4819,6 +6082,7 @@ class EjecutorLote:
             error=lambda texto: self._entregar(eventos.error, texto),
             tick=lambda total, restante: self._entregar(eventos.tick, total, restante),
             gasto=lambda usd, consumo: self._entregar(eventos.gasto, usd, consumo),
+            plan=lambda estado: self._entregar(eventos.plan, estado),
         )
 
     def _entregar(self, metodo: Callable[..., None], *args: Any) -> None:
@@ -4832,7 +6096,319 @@ class EjecutorLote:
 
 
 # ============================================================================
-# 21. Terminal (--cli)
+# 23. La cola del modo simple
+#    (claude_batch_monitor/cola.py)
+# ============================================================================
+#
+# La cola de preguntas del modo simple.
+#
+# Una persona escribe preguntas; la cola las guarda en disco, las envía una a una
+# en un hilo aparte y, si la API pide esperar (límite por minuto, servidor saturado,
+# sin conexión), espera sola y continúa. Se pueden añadir preguntas mientras se
+# envía y, si se cierra el programa, lo pendiente sigue ahí al volver a abrirlo.
+#
+# Esta clase NO sabe nada de ventanas: informa de lo que ocurre a través de
+# `EventosCola`, y cada evento se entrega mediante `publicar` (en la interfaz,
+# el puente que lo ejecuta en el hilo de la ventana). Eso la hace probable sin
+# pantalla.
+
+
+ETIQUETA = "cola"
+
+
+@dataclass(frozen=True)
+class EstadoCola:
+    """Qué está haciendo la cola ahora mismo (lo que se le cuenta a la persona)."""
+
+    tipo: str = "idle"  # idle | sending | waiting | paused | stopped
+    motivo: str = ""    # waiting: rate_limit | server | sin_conexion | cuota | plan | franja
+    razon: Optional[StopReason] = None  # stopped: por qué
+    msg_id: Optional[int] = None
+    segundos: float = 0.0
+    texto: str = ""     # detalle (mensaje de error de la API, ya redactado)
+    codigo: str = ""    # stopped, con el plan de Claude: el problema en una palabra (no_instalado, sin_sesion, uso_extra…)
+
+
+class EventosCola:
+    """Lo que la interfaz recibe. Los métodos por defecto no hacen nada."""
+
+    def orden_cambiada(self, msg: JobMessage) -> None: ...
+    def estado(self, estado: EstadoCola) -> None: ...
+    def cuenta_atras(self, restante: float) -> None: ...
+    def delta(self, msg_id: int, texto: str) -> None: ...
+    def gasto(self, usd: Decimal) -> None: ...
+    def plan(self, estado: Any) -> None: ...  # plan de Claude: lo último que se sabe de su cupo
+    def error(self, texto: str) -> None: ...
+
+
+FabricaMotor = Callable[[Configuracion, Job], Any]
+
+
+class Cola:
+    def __init__(
+        self,
+        config: Configuracion,
+        eventos: Optional[EventosCola] = None,
+        publicar: Optional[Callable[[Callable[[], None]], None]] = None,
+        fabrica: FabricaMotor = motor_para,
+        job: Optional[Job] = None,
+    ):
+        self.config = config
+        self.eventos = eventos or EventosCola()
+        self._publicar = publicar or (lambda f: f())
+        self._fabrica = fabrica
+        self.job = job
+        self.notificaciones = True
+
+        self._lock = threading.RLock()
+        self._hilo: Optional[threading.Thread] = None
+        self._motor: Any = None
+        self._pausada = False
+        self._enviando: Optional[int] = None
+        self.estado = EstadoCola()
+        self.ultimo_error = ""
+
+    # ------------------------------------------------------------------
+    # Estado
+    # ------------------------------------------------------------------
+
+    @property
+    def activa(self) -> bool:
+        with self._lock:
+            return self._hilo is not None and self._hilo.is_alive()
+
+    @property
+    def pausada(self) -> bool:
+        return self._pausada
+
+    def preguntas(self) -> list[JobMessage]:
+        return list(self.job.messages) if self.job else []
+
+    def pendientes(self) -> int:
+        return len(self.job.pendientes()) if self.job else 0
+
+    def gastado(self) -> Decimal:
+        return self.job.coste_total() if self.job else Decimal(0)
+
+    def cargar_ultima(self) -> int:
+        """Recupera la cola de la sesión anterior. Devuelve cuántas preguntas quedan pendientes."""
+        lotes = listar_jobs(etiqueta=ETIQUETA)
+        if lotes:
+            self.job = Job.load(lotes[0]["job_id"])
+        return self.pendientes()
+
+    def _config_de_envio(self) -> Configuracion:
+        """La configuración con la que se envía, con los ajustes que fija el modo simple."""
+        return replace(
+            self.config,
+            modo="plan" if self.config.es_plan else "inmediato",  # el modo lote es de la ventana avanzada
+            concurrencia=1,
+            streaming=True,
+            pausa_entre_mensajes_sec=0,
+            estimar_antes_de_enviar=True,
+            reset_gasto_por_lote=True,  # el tope es por cola: parte de lo que esta cola ya gastó
+            modo_continuo=False,
+            hora_limite="",
+        )
+
+    # ------------------------------------------------------------------
+    # Acciones de la persona
+    # ------------------------------------------------------------------
+
+    def agregar(self, texto: str) -> Optional[JobMessage]:
+        """Añade una pregunta a la cola y, si no está pausada, empieza a enviarla."""
+        texto = (texto or "").strip()
+        if not texto:
+            return None
+        with self._lock:
+            if self.job is None:
+                self.job = Job.crear([], self._config_de_envio(), etiqueta=ETIQUETA)
+                self.job.save()
+            msg = self.job.agregar_orden(texto)
+        self._emitir(self.eventos.orden_cambiada, msg)
+        self._despertar()
+        return msg
+
+    def pausar(self) -> None:
+        with self._lock:
+            self._pausada = True
+            if self._motor is not None:
+                self._motor.detener()  # termina la pregunta en curso y no envía más
+        self._set_estado(EstadoCola("paused"))
+
+    def reanudar(self) -> None:
+        """Quita la pausa y vuelve a intentar lo pendiente (y lo que falló: tras arreglar la causa)."""
+        with self._lock:
+            self._pausada = False
+            self.ultimo_error = ""
+            if self.job is not None and self.job.reintentar_fallidas():
+                for m in self.job.messages:
+                    self._emitir(self.eventos.orden_cambiada, m)
+        self._despertar()
+
+    def quitar(self, msg_id: int) -> bool:
+        """Saca una pregunta de la cola si aún no se ha enviado."""
+        with self._lock:
+            msg = self.job.mensaje(msg_id) if self.job else None
+            if msg is None or msg.status != STATUS_PENDING or self._enviando == msg_id:
+                return False
+            msg.status = STATUS_SKIPPED
+            msg.detalle = "Quitada de la cola."
+            self.job.save()
+        self._emitir(self.eventos.orden_cambiada, msg)
+        return True
+
+    def nueva(self) -> bool:
+        """Empieza una cola en blanco (la anterior queda guardada en disco). Solo si está en reposo."""
+        with self._lock:
+            if self.activa:
+                return False
+            self.job = None
+            self._pausada = False
+            self.ultimo_error = ""
+        self._set_estado(EstadoCola("idle"))
+        return True
+
+    def actualizar_config(self, config: Configuracion) -> None:
+        """Los cambios (tope, modelo…) valen para el siguiente envío."""
+        with self._lock:
+            self.config = config
+
+    def cerrar(self, timeout: float = 5.0) -> None:
+        """Para el hilo. Lo pendiente queda guardado y seguirá la próxima vez."""
+        with self._lock:
+            self._pausada = True
+            motor, hilo = self._motor, self._hilo
+            if motor is not None:
+                motor.detener()
+        if hilo is not None and hilo.is_alive():
+            hilo.join(timeout)
+
+    # ------------------------------------------------------------------
+    # El hilo
+    # ------------------------------------------------------------------
+
+    def _despertar(self) -> None:
+        with self._lock:
+            if self._pausada or self.job is None or not self.job.pendientes():
+                return
+            if self._hilo is not None and self._hilo.is_alive():
+                return  # el bucle recogerá lo nuevo cuando termine con lo actual
+            self._hilo = threading.Thread(target=self._bucle, name="cola-de-preguntas", daemon=True)
+            self._hilo.start()
+
+    def _bucle(self) -> None:
+        while True:
+            with self._lock:
+                if self._pausada or self.job is None or not self.job.pendientes():
+                    # Decidir salir y soltar el hilo en el MISMO cerrojo: así una pregunta
+                    # añadida justo ahora no se queda esperando a nadie.
+                    self._hilo = None
+                    self._enviando = None
+                    self._set_estado(EstadoCola("paused" if self._pausada and self.pendientes() else "idle"))
+                    return
+                try:
+                    envio = self._config_de_envio()
+                    if (self.job.modo, self.job.modelo) != (envio.modo, envio.nombre_de_modelo):
+                        # Cambió cómo se usa Claude (plan/clave) o el modelo: la cola lo cuenta tal como sigue ahora
+                        # (si no, exportarla o reanudarla desde la terminal diría —y haría— lo que ya no es).
+                        self.job.modo, self.job.modelo = envio.modo, envio.nombre_de_modelo
+                        self.job.save()
+                    motor = self._fabrica(envio, self.job)
+                    motor.notificaciones = self.notificaciones
+                except Exception as error:
+                    # Sin esto el hilo moría con la excepción sin capturar y la ventana se
+                    # quedaba sin saber nada: ni error, ni estado, ni forma de reintentar.
+                    logger.exception("No se pudo preparar el envío")
+                    self.ultimo_error = f"No se pudo preparar el envío: {error}"
+                    self._emitir(self.eventos.error, self.ultimo_error)
+                    self._hilo = None
+                    self._enviando = None
+                    self._set_estado(EstadoCola("stopped", razon=StopReason.FATAL, texto=self.ultimo_error))
+                    return
+                self._motor = motor
+            problema = ""
+            try:
+                # Mientras hay algo que enviar o esperando, el equipo no debe dormirse (si no, «espera sola» sería falso).
+                # En Windows esto es POR HILO, así que se activa y se suelta aquí, en el hilo que trabaja.
+                with KeepAwake():
+                    razon = motor.ejecutar(self._callbacks())
+                problema = str(getattr(motor, "problema", "") or "")
+            except Exception as error:  # pragma: no cover - defensa; el motor ya captura casi todo
+                logger.exception("Fallo inesperado en la cola")
+                self.ultimo_error = f"Error inesperado: {error}"
+                self._emitir(self.eventos.error, self.ultimo_error)
+                razon = StopReason.FATAL
+            with self._lock:
+                self._motor = None
+                self._enviando = None
+                if razon is StopReason.COMPLETED:
+                    continue  # ¿llegó algo mientras tanto? el bucle lo comprueba arriba
+                if razon is StopReason.STOPPED and self._pausada:
+                    continue  # la pausa se resuelve arriba, con el estado correcto
+                self._hilo = None
+                self._set_estado(EstadoCola("stopped", razon=razon, texto=self.ultimo_error, codigo=problema))
+                return
+
+    def _callbacks(self) -> Callbacks:
+        def estado(texto: str, activo: bool) -> None:
+            pass  # el texto del motor está en español; la interfaz redacta el suyo
+
+        def inicio_orden(msg: JobMessage) -> None:
+            self._enviando = msg.id
+            self._set_estado(EstadoCola("sending", msg_id=msg.id))
+
+        def resultado(msg: JobMessage) -> None:
+            if self._enviando == msg.id and msg.status != STATUS_PENDING:
+                self._enviando = None
+            self._emitir(self.eventos.orden_cambiada, msg)
+
+        def espera(motivo: str, segundos: float) -> None:
+            self._set_estado(EstadoCola("waiting", motivo=motivo, segundos=segundos, msg_id=self._enviando))
+
+        def tick(total: float, restante: float) -> None:
+            self._emitir(self.eventos.cuenta_atras, restante)
+
+        def gasto(usd: Decimal, consumo: Any) -> None:
+            self._emitir(self.eventos.gasto, usd)
+
+        def plan(estado: Any) -> None:
+            self._emitir(self.eventos.plan, estado)
+
+        def error(texto: str) -> None:
+            self.ultimo_error = texto
+            self._emitir(self.eventos.error, texto)
+
+        def delta(msg_id: int, texto: str) -> None:
+            self._emitir(self.eventos.delta, msg_id, texto)
+
+        return Callbacks(
+            estado=estado, inicio_orden=inicio_orden, resultado=resultado, espera=espera,
+            tick=tick, gasto=gasto, error=error, delta=delta, plan=plan,
+        )
+
+    # ------------------------------------------------------------------
+
+    def _set_estado(self, estado: EstadoCola) -> None:
+        self.estado = estado
+        self._emitir(self.eventos.estado, estado)
+
+    def _emitir(self, metodo: Callable[..., None], *args: Any) -> None:
+        def entregar() -> None:
+            try:
+                metodo(*args)
+            except Exception:
+                logger.exception("Fallo en un evento de la cola")
+
+        self._publicar(entregar)
+
+
+def hay_fallidas(job: Optional[Job]) -> bool:
+    return bool(job and any(m.status == STATUS_FAILED for m in job.messages))
+
+
+# ============================================================================
+# 24. Terminal (--cli)
 #    (claude_batch_monitor/cli.py)
 # ============================================================================
 #
@@ -4842,7 +6418,7 @@ class EjecutorLote:
 #
 #     0  todo completado
 #     1  error fatal o de red, o terminó con órdenes fallidas
-#     2  detenido por el tope de gasto
+#     2  detenido por el tope de gasto (o porque el plan de Claude empezó a gastar créditos extra)
 #     3  sin saldo, o límite de gasto de la cuenta de Anthropic
 #     4  incompleto (hora límite o cancelado con Ctrl+C)
 #     5  uso incorrecto (argumentos, fichero, configuración) o ya hay otra copia del programa en marcha
@@ -4855,6 +6431,7 @@ _CODIGOS = {
     StopReason.FATAL: EXIT_FALLO,
     StopReason.NETWORK: EXIT_FALLO,
     StopReason.BUDGET: EXIT_TOPE,
+    StopReason.EXTRA_USAGE: EXIT_TOPE,
     StopReason.NO_CREDIT: EXIT_SIN_SALDO,
     StopReason.ACCOUNT_LIMIT: EXIT_SIN_SALDO,
     StopReason.STOPPED: EXIT_INCOMPLETO,
@@ -4911,10 +6488,13 @@ def construir_parser() -> argparse.ArgumentParser:
                    help="Cancela en el servidor el lote en curso (lo ya procesado se cobra) y sale")
 
     m = p.add_argument_group("modelo")
-    m.add_argument("--modelo", help=f"Por defecto {DEFAULT_MODEL}; al reanudar, el del lote")
+    m.add_argument("--modelo", help=f"Por defecto {DEFAULT_MODEL}; al reanudar, el del lote. Con --modo plan: un alias "
+                                    "(sonnet, opus, haiku…); sin él, el que traiga tu plan por defecto")
     m.add_argument("--system", help="Prompt de sistema compartido (texto o ruta a fichero)")
-    m.add_argument("--modo", choices=("inmediato", "lote"),
-                   help="'lote' = Batches API, 50 %% más barato. Al reanudar se hereda el del lote")
+    m.add_argument("--modo", choices=("inmediato", "lote", "plan"),
+                   help="'lote' = Batches API, 50 %% más barato. 'plan' = con tu plan de Claude (Pro/Max) a través de "
+                        "Claude Code, sin pagar por token: espera sola a que el límite se renueve. "
+                        "Al reanudar se hereda el del lote")
     m.add_argument("--max-tokens", type=int, help="Tokens máximos de salida por orden (por defecto 16000)")
     m.add_argument("--esfuerzo", choices=NIVELES_ESFUERZO, help="Nivel de esfuerzo (solo en modelos que lo soportan)")
     m.add_argument("--sin-cache", action="store_true", help="Desactiva el prompt caching")
@@ -4929,6 +6509,7 @@ def construir_parser() -> argparse.ArgumentParser:
     t = p.add_argument_group("tiempos")
     t.add_argument("--bucle", action="store_true", help="ATENCIÓN: repite el lote hasta la hora límite o el tope")
     t.add_argument("--hora-limite", help="HH:MM. En bucle, 23:59 por defecto")
+    t.add_argument("--franja", help="Trabaja solo entre dos horas: --franja 22:00-07:00 (cruza la medianoche)")
     t.add_argument("--pausa-ciclos", type=int, default=10, help="Segundos entre ciclos del bucle")
     t.add_argument("--pausa", type=int, default=0, help="Segundos de pausa entre órdenes")
 
@@ -5036,6 +6617,10 @@ def _configuracion(args: argparse.Namespace, job: Optional[Job]) -> Configuracio
     # de modo que reanudar por CLI un lote creado en modo lote lo reenviaba entero por
     # la API normal, al doble de precio y sin recoger el lote ya pagado en el servidor.
     c.modo = args.modo or (job.modo if job else "inmediato")
+    if c.es_plan:  # con el plan, el «modelo» es un alias de Claude Code; en blanco = el que traiga el plan
+        heredado = job.modelo if job and job.modo == "plan" and job.modelo != MODELO_DEL_PLAN else ""
+        c.modelo_plan = args.modelo or heredado
+    c.franja = args.franja or ""
     c.system_prompt = _texto_o_fichero(args.system) if args.system is not None else (job.system_prompt if job else "")
     c.separador = args.separador
     c.usar_cache = not args.sin_cache
@@ -5073,19 +6658,27 @@ def _resumen_del_lote(razon: StopReason, job: Job, engine: Optional[EngineBase],
     }
 
 
-def _callbacks(salida: _Salida, args: argparse.Namespace) -> Callbacks:
+def _callbacks(salida: _Salida, args: argparse.Namespace, con_plan: bool = False) -> Callbacks:
     def estado(texto: str, activo: bool) -> None:
         salida.info(f"[{datetime.now():%H:%M:%S}] {texto}")
 
     def resultado(msg: JobMessage) -> None:
         marca = {"completed": "OK", "refused": "RECHAZADA", "failed": "FALLO"}.get(msg.status, msg.status)
         extra = f" {msg.detalle}" if msg.detalle else ""
-        salida.info(f"  orden {msg.id}: {marca} · {msg.tokens_input + msg.tokens_output} tok · "
-                    f"{formatear_usd(msg.coste_usd, 6)}{extra}")
+        coste = "" if con_plan else f" · {formatear_usd(msg.coste_usd, 6)}"   # con el plan no se paga por orden
+        salida.info(f"  orden {msg.id}: {marca} · {msg.tokens_input + msg.tokens_output} tok{coste}{extra}")
 
     def tick(total: float, restante: float) -> None:
         if salida.tty and not salida.silencioso:
             print(f"\r  esperando… {int(restante)} s ", end="", file=salida.flujo, flush=True)
+
+    ultimo_plan = [""]
+
+    def plan(estado: Any) -> None:
+        resumen = estado.resumen()
+        if resumen and resumen != ultimo_plan[0]:
+            ultimo_plan[0] = resumen
+            salida.info(f"  Tu plan: {resumen}")
 
     return Callbacks(
         estado=estado,
@@ -5093,6 +6686,7 @@ def _callbacks(salida: _Salida, args: argparse.Namespace) -> Callbacks:
         error=lambda texto: salida.error(texto),
         fin_ciclo=lambda c, t, n: salida.info(f"Ciclo {n} terminado: {c}/{t} completadas."),
         tick=tick,
+        plan=plan,
     )
 
 
@@ -5215,7 +6809,7 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
         salida.aviso(f"--limit {args.limit}: solo se procesarán las primeras {len(textos)} órdenes.")
 
     # ---- estimación ----
-    est = estimar(config, textos, client=_cliente_para_conteo() if args.dry_run else None)
+    est = estimar(config, textos, client=_cliente_para_conteo() if args.dry_run and not config.es_plan else None)
     for aviso in est.avisos:
         if aviso not in validacion.avisos:
             salida.aviso(aviso)
@@ -5224,11 +6818,13 @@ def main_cli(argv: Optional[list[str]] = None) -> int:
             print(json.dumps({
                 "ordenes": est.ordenes, "modo": est.modo, "tokens_entrada": est.tokens_entrada,
                 "coste_maximo_usd": str(est.coste_maximo), "tope_gasto_usd": str(config.tope_gasto_usd),
+                "plan": est.plan,
             }, ensure_ascii=False))
         else:
             print("\n".join(est.resumen_lineas()))
-            tope = "sin tope" if config.tope_gasto_usd == 0 else formatear_usd(config.tope_gasto_usd)
-            print(f"Tope configurado   : {tope}")
+            if not est.plan:
+                tope = "sin tope" if config.tope_gasto_usd == 0 else formatear_usd(config.tope_gasto_usd)
+                print(f"Tope configurado   : {tope}")
             print("\nNo se ha enviado nada (--dry-run).")
         return EXIT_OK
     if not textos:
@@ -5252,8 +6848,12 @@ def _ejecutar_lote(
     if job is None:
         job = Job.crear(textos, config)
         job.save()
-        salida.info(f"Lote {job.job_id}: {len(textos)} órdenes · {config.modelo} · modo {config.modo} · "
-                    f"peor caso {formatear_usd(est.coste_maximo)}")
+        if config.es_plan:
+            modelo = f" ({config.modelo_plan})" if config.modelo_plan else ""
+            salida.info(f"Lote {job.job_id}: {len(textos)} órdenes · con tu plan de Claude{modelo} · sin coste por token")
+        else:
+            salida.info(f"Lote {job.job_id}: {len(textos)} órdenes · {config.modelo} · modo {config.modo} · "
+                        f"peor caso {formatear_usd(est.coste_maximo)}")
 
     # ---- ejecución ----
     try:
@@ -5262,9 +6862,8 @@ def _ejecutar_lote(
     except Exception:
         logger.exception("No se pudieron purgar los lotes antiguos")
 
-    clase = BatchEngine if config.es_lote else SequentialEngine
-    motor = clase(config, job)
-    cb = _callbacks(salida, args)
+    motor = motor_para(config, job)
+    cb = _callbacks(salida, args, con_plan=config.es_plan)
     razon = StopReason.FATAL
     try:
         with KeepAwake():
@@ -5296,14 +6895,17 @@ def _ejecutar_lote(
         print(f"  Completadas {resumen['completadas']}/{resumen['total']}"
               f" · fallidas {resumen['fallidas']} · rechazadas {resumen['rechazadas']}"
               f" · pendientes {resumen['pendientes']}")
-        print(f"  Coste de este lote: {formatear_usd(job.coste_total())}")
+        if config.es_plan:
+            print("  Coste de este lote: incluido en tu plan")
+        else:
+            print(f"  Coste de este lote: {formatear_usd(job.coste_total())}")
         if resumen["pendientes"] or resumen["fallidas"]:
             print(f"  Para continuar: --reanudar {job.job_id}")
     return resumen["codigo_de_salida"]
 
 
 # ============================================================================
-# 22. Interfaz: textos en español e inglés
+# 25. Interfaz: textos en español e inglés
 #    (claude_batch_monitor/gui/i18n.py)
 # ============================================================================
 #
@@ -5694,7 +7296,7 @@ def t(clave: str, **valores: object) -> str:
 
 
 # ============================================================================
-# 23. Interfaz: colores, tipografías y estilos
+# 26. Interfaz: colores, tipografías y estilos
 #    (claude_batch_monitor/gui/estilo.py)
 # ============================================================================
 #
@@ -5889,7 +7491,7 @@ def tarjeta(master: tk.Misc, p: Paleta = PALETA, **kw: object) -> tk.Frame:
 
 
 # ============================================================================
-# 24. Interfaz: el icono, dibujado con código
+# 27. Interfaz: el icono, dibujado con código
 #    (claude_batch_monitor/gui/icono.py)
 # ============================================================================
 #
@@ -5968,7 +7570,7 @@ def imagen_pil(tamano: int = 64):
 
 
 # ============================================================================
-# 25. Interfaz: ventanas y paneles comunes
+# 28. Interfaz: ventanas y paneles comunes
 #    (claude_batch_monitor/gui/comun.py)
 # ============================================================================
 #
@@ -6098,7 +7700,7 @@ def avisar_de_errores_inesperados(root: tk.Misc, segundos_sin_repetir: float = 3
 
 
 # ============================================================================
-# 26. Interfaz: puente entre hilos
+# 29. Interfaz: puente entre hilos
 #    (claude_batch_monitor/gui/bridge.py)
 # ============================================================================
 #
@@ -6175,7 +7777,7 @@ class UiBridge:
 
 
 # ============================================================================
-# 27. Interfaz: icono en la bandeja del sistema (opcional)
+# 30. Interfaz: icono en la bandeja del sistema (opcional)
 #    (claude_batch_monitor/gui/tray.py)
 # ============================================================================
 #
@@ -6251,7 +7853,7 @@ class BandejaDelSistema:
 
 
 # ============================================================================
-# 28. Interfaz: respuestas con formato
+# 31. Interfaz: respuestas con formato
 #    (claude_batch_monitor/gui/formato.py)
 # ============================================================================
 #
@@ -6504,7 +8106,7 @@ def mostrar_texto_con_formato(caja: tk.Text, texto: str, p: Any, fuentes: Any, c
 
 
 # ============================================================================
-# 29. Interfaz avanzada: ventanas secundarias
+# 32. Interfaz avanzada: ventanas secundarias
 #    (claude_batch_monitor/gui/dialogos.py)
 # ============================================================================
 #
@@ -6720,7 +8322,7 @@ class DialogoLotes(Modal):
 
 
 # ============================================================================
-# 30. Modo simple
+# 33. Modo simple
 #    (claude_batch_monitor/gui/simple.py)
 # ============================================================================
 #
@@ -7780,7 +9382,7 @@ def ejecutar_simple(config: Optional[Configuracion] = None) -> Optional[str]:
 
 
 # ============================================================================
-# 31. Modo avanzado
+# 34. Modo avanzado
 #    (claude_batch_monitor/gui/app.py)
 # ============================================================================
 #
@@ -9267,7 +10869,7 @@ def ejecutar_avanzada(config: Optional[Configuracion] = None) -> Optional[str]:
 
 
 # ============================================================================
-# 32. Abrir la interfaz
+# 35. Abrir la interfaz
 #    (claude_batch_monitor/gui/__init__.py)
 # ============================================================================
 #
@@ -9361,7 +10963,7 @@ def _abrir(argv: Optional[list[str]], tk: Any) -> int:
 
 
 # ============================================================================
-# 33. Instalar la librería de Anthropic si falta
+# 36. Instalar la librería de Anthropic si falta
 #    (claude_batch_monitor/instalacion.py)
 # ============================================================================
 #
@@ -9401,8 +11003,41 @@ def falta_anthropic() -> bool:
         return True
 
 
+def _valor_de(argv: list[str], opcion: str) -> str:
+    """El valor de `--opcion valor` o `--opcion=valor` en una línea de órdenes ("" si no está)."""
+    for i, a in enumerate(argv):
+        if a == opcion and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(opcion + "="):
+            return a.split("=", 1)[1]
+    return ""
+
+
+def usa_el_plan(argv: list[str], terminal: bool) -> bool:
+    """¿Se va a trabajar con el plan de Claude (Claude Code), que no usa la librería de la API?
+
+    En la terminal lo dice `--modo plan` o el lote que se reanuda. En la ventana, el modo guardado; y la primera vez
+    (aún no hay configuración) tampoco hace falta: la pantalla de bienvenida deja elegir entre el plan y la API.
+    """
+    try:
+        if terminal:
+            modo = _valor_de(argv, "--modo")
+            if modo:
+                return modo == "plan"
+            ident = _valor_de(argv, "--reanudar")
+            job = Job.load(ident) if ident else None
+            return bool(job and job.modo == "plan")
+        if not CONFIG_FILE.exists():
+            return True
+        return ConfigManager.cargar().es_plan
+    except Exception:  # pragma: no cover - si no se puede saber, se pide la librería como siempre
+        return False
+
+
 def necesita_la_libreria(argv: list[str], terminal: bool) -> bool:
-    """La ventana siempre; en la terminal, salvo estimar, listar o pedir ayuda/versión."""
+    """La ventana siempre; en la terminal, salvo estimar, listar o pedir ayuda/versión. Nunca con el plan de Claude."""
+    if usa_el_plan(argv, terminal):
+        return False
     return not terminal or not any(a.split("=", 1)[0] in _SIN_API for a in argv)
 
 
@@ -9683,7 +11318,7 @@ def resolver_falta_de_la_libreria(terminal: bool) -> int:
 
 
 # ============================================================================
-# 34. Arranque
+# 37. Arranque
 #    (claude_batch_monitor/__main__.py)
 # ============================================================================
 #
